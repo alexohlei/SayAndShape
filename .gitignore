@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+*.log.*
+/jobs/*
+!/jobs/.gitkeep
+/clones/*
+!/clones/.gitkeep
+/config/apps.json
+/config/auth.json
+/.agent-keys.json
+/config/nginx-*.conf

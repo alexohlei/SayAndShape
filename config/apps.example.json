@@ -1,0 +1,29 @@
+{
+  "max_parallel_jobs": 3,
+  "language": "en",
+  "apps": {
+    "my-site": {
+      "name": "My Site",
+      "base_dir": "/var/www/my-site",
+      "clone_dir": "/var/www/SayAndShape/clones/my-site",
+      "serve_base": "/w/",
+      "public_workspace": "main",
+      "app_url": "https://example.org",
+      "serve": "root",
+      "server": "apache",
+      "auth": { "mode": "engine" },
+      "shared_dirs": ["media"],
+      "allowed_changes": "Behavior, appearance, layout, colors, animations, texts and content of the application",
+      "max_files_per_change": 20,
+      "auto_commit_host_changes": true,
+      "extra_blocked_patterns": [],
+      "extra_blocked_files": [".env", "config.php", ".htaccess", "sayandshape-router.php"]
+    }
+  },
+  "agent": {
+    "engine": "claude",
+    "claude_model": "claude-opus-5-5",
+    "codex_model": "gpt-6.1-terra",
+    "effort": "medium"
+  }
+}
