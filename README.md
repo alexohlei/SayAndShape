@@ -212,3 +212,7 @@ Regression tests use temporary repositories and simulated agents; they make no m
 Commands are in [orchestrator/README.md](orchestrator/README.md#tests-temporary-repositories-and-local-test-servers-only).
 
 </details>
+
+## License
+
+[MIT](LICENSE)
