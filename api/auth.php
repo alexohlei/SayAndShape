@@ -228,17 +228,23 @@ function sayandshapeOriginAllowed(string $origin): bool {
     return false;
 }
 
-function sayandshapeBody(): array {
+/**
+ * A POST with exactly this content type. Protection against cross-site requests: a foreign form can send neither
+ * application/json nor application/octet-stream, and if the browser sends an Origin it has to be this site itself.
+ */
+function sayandshapeRequirePost(string $expected): void {
     if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
         header('Allow: POST');
         sayandshapeFail('POST required', 405);
     }
-    // Protection against cross-site requests: only real JSON requests (a foreign form cannot send
-    // application/json) and, if the browser sends an Origin, only from this site itself.
     $type = strtolower(trim(explode(';', (string) ($_SERVER['CONTENT_TYPE'] ?? ''))[0]));
-    if ($type !== 'application/json') sayandshapeFail('Request not allowed', 403);
+    if ($type !== $expected) sayandshapeFail('Request not allowed', 403);
     $origin = $_SERVER['HTTP_ORIGIN'] ?? null;
     if ($origin !== null && !sayandshapeOriginAllowed((string) $origin)) sayandshapeFail('Request not allowed', 403);
+}
+
+function sayandshapeBody(): array {
+    sayandshapeRequirePost('application/json');
     $raw = file_get_contents('php://input', false, null, 0, 65537);
     if (strlen($raw) > 65536) sayandshapeFail('Request too large', 413);
     $data = json_decode($raw, true);
@@ -367,6 +373,7 @@ function sayandshapeJobStatus(array $job): array {
     // The request itself, so the panel can show it next to the result and build follow-up answers.
     if (isset($job['transcript'])) $status['prompt'] = $job['transcript'];
     if (isset($job['submitted_at'])) $status['submitted_at'] = $job['submitted_at'];
+    if (!empty($job['attachments'])) $status['attachments'] = $job['attachments'];
     if (($job['action'] ?? '') === 'fork') {
         $status['source'] = $job['source'] ?? null;
         $status['name'] = $job['name'] ?? null;
@@ -442,6 +449,8 @@ function sayandshapeEnqueue(int $user, array $body, string $action): void {
         if ($author !== null) $job['author'] = $author;
         if ($action === 'baseline') $job['expected_head'] = $body['expected_head'];
         if ($action === 'change' || $action === 'discuss') $job['transcript'] = $body['transcript'];
+        // Validated by submit.php (sayandshapeAttachments): the uploads the agent gets with the request.
+        if ($action === 'change' && !empty($body['attachments'])) $job['attachments'] = $body['attachments'];
         if ($action === 'rollback') {
             $job['commit_hash'] = $body['commit_hash'];
             $job['expected_head'] = $body['expected_head'];
@@ -493,4 +502,106 @@ function sayandshapeChat(string $appId, string $workspace): array {
     $data = json_decode((string) @file_get_contents(sayandshapeChatPath($appId, $workspace)), true);
     $messages = is_array($data) && is_array($data['messages'] ?? null) ? $data['messages'] : [];
     return array_values(array_filter($messages, 'is_array'));
+}
+
+/* ── Uploads (files attached to a change request) ───────────────────── */
+
+/** File types people may attach unless the project sets `upload_types`: media, documents and what a browser runs.
+    The worker has the same list (UPLOAD_TYPES in orchestrator/worker.py). */
+const SAYANDSHAPE_UPLOAD_TYPES = [
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg', 'ico', 'bmp', 'tif', 'tiff', 'heic',
+    'mp4', 'm4v', 'webm', 'mov', 'ogv', 'mp3', 'm4a', 'ogg', 'oga', 'wav', 'flac', 'aac', 'opus', 'vtt', 'srt',
+    'woff', 'woff2', 'ttf', 'otf', 'eot',
+    'pdf', 'txt', 'md', 'csv', 'tsv', 'json', 'xml', 'rtf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+    'odt', 'ods', 'odp', 'ics', 'vcf',
+    'html', 'htm', 'css', 'js', 'mjs',
+];
+/** Never accepted, whatever `upload_types` says: types a web server may run or read as its configuration.
+    An upload reaches the project byte for byte; the guardrail judges the request, not the file. */
+const SAYANDSHAPE_UPLOAD_BLOCKED = [
+    'php', 'php3', 'php4', 'php5', 'php7', 'php8', 'phps', 'pht', 'phtml', 'phar', 'inc', 'cgi', 'fcgi', 'pl', 'py', 'rb',
+    'sh', 'bash', 'asp', 'aspx', 'jsp', 'jspx', 'shtml', 'htaccess', 'htpasswd', 'ini', 'env', 'exe', 'dll', 'so',
+];
+const SAYANDSHAPE_UPLOAD_ID = '/^u_[a-z0-9_]{1,80}$/D';
+/** The panel sends files in pieces of this size: below Nginx's default request limit (1 MB) and PHP's post_max_size. */
+const SAYANDSHAPE_UPLOAD_CHUNK = 524288;
+/** Uploads that no job was sent with for this long are removed. */
+const SAYANDSHAPE_UPLOAD_HOURS = 24;
+
+function sayandshapeUploadDir(): string { return sayandshapeEngineDir() . '/jobs/.uploads'; }
+
+/** What a project accepts: max_upload_files (0 switches uploads off), max_upload_mb and upload_types. */
+function sayandshapeUploadLimits(array $app): array {
+    $files = $app['max_upload_files'] ?? 10;
+    $mb = $app['max_upload_mb'] ?? 25;
+    $types = is_array($app['upload_types'] ?? null) ? array_filter($app['upload_types'], 'is_string') : SAYANDSHAPE_UPLOAD_TYPES;
+    return ['max_files' => is_int($files) ? max(0, min($files, 50)) : 10,
+            'max_bytes' => (is_int($mb) ? max(1, min($mb, 200)) : 25) * 1048576,
+            'types' => array_values(array_unique(array_diff(array_map('strtolower', $types), SAYANDSHAPE_UPLOAD_BLOCKED)))];
+}
+
+/**
+ * The name a file is stored and handed to the agent under: "Büro Foto.final.JPG" becomes "Buero-Foto-final.jpg".
+ * Only one dot remains, so no second extension can make a server treat the file as a program.
+ * Null when the type is not among $types.
+ */
+function sayandshapeUploadName(string $name, array $types): ?string {
+    if (class_exists('Normalizer')) $name = Normalizer::normalize($name, Normalizer::FORM_C) ?: $name;
+    $name = basename(str_replace('\\', '/', $name));
+    $dot = strrpos($name, '.');
+    if ($dot === false) return null;
+    $ext = strtolower(substr($name, $dot + 1));
+    if (!preg_match('/^[a-z0-9]{1,10}$/D', $ext) || !in_array($ext, $types, true)) return null;
+    $stem = str_replace(['ä', 'ö', 'ü', 'Ä', 'Ö', 'Ü', 'ß'], ['ae', 'oe', 'ue', 'Ae', 'Oe', 'Ue', 'ss'], substr($name, 0, $dot));
+    // Other accents lose their mark ("Café" becomes "Cafe") where PHP's intl extension is there; otherwise the letter goes.
+    if (class_exists('Normalizer')) $stem = (string) preg_replace('/\p{Mn}+/u', '', Normalizer::normalize($stem, Normalizer::FORM_D) ?: $stem);
+    $stem = trim(substr(trim((string) preg_replace('/[^A-Za-z0-9_-]+/', '-', $stem), '-_'), 0, 80), '-_');
+    return ($stem === '' ? 'file' : $stem) . '.' . $ext;
+}
+
+/** Stored facts of an upload (id, user_id, app_id, name, size, complete), or null. */
+function sayandshapeUploadMeta($id): ?array {
+    if (!is_string($id) || !preg_match(SAYANDSHAPE_UPLOAD_ID, $id)) return null;
+    $meta = json_decode((string) @file_get_contents(sayandshapeUploadDir() . "/$id.json"), true);
+    return is_array($meta) && ($meta['id'] ?? null) === $id && is_string($meta['name'] ?? null) && is_int($meta['size'] ?? null) ? $meta : null;
+}
+
+/**
+ * The finished uploads a change request names, as [{id, name, size}] from the stored facts, not from the browser.
+ * An upload belongs to the user and project it was made for. Answers 410 with the missing IDs when one is gone.
+ */
+function sayandshapeAttachments(int $user, array $body): array {
+    $ids = $body['attachments'] ?? [];
+    if (!is_array($ids) || !array_is_list($ids)) sayandshapeFail('Invalid attachments');
+    foreach ($ids as $id) {
+        if (!is_string($id) || !preg_match(SAYANDSHAPE_UPLOAD_ID, $id)) sayandshapeFail('Invalid attachments');
+    }
+    $ids = array_values(array_unique($ids));
+    if (!$ids) return [];
+    $appId = $body['app_id'] ?? null;
+    $limits = sayandshapeUploadLimits(sayandshapeApp($appId));
+    if (count($ids) > $limits['max_files']) sayandshapeFail('At most {max} files per request', 400, ['max' => $limits['max_files']]);
+    $found = [];
+    $missing = [];
+    foreach ($ids as $id) {
+        $meta = sayandshapeUploadMeta($id);
+        if ($meta === null || ($meta['user_id'] ?? null) !== $user || ($meta['app_id'] ?? null) !== $appId
+            || empty($meta['complete']) || !is_file(sayandshapeUploadDir() . "/$id.bin")) {
+            $missing[] = $id;
+            continue;
+        }
+        if (!in_array(pathinfo($meta['name'], PATHINFO_EXTENSION), $limits['types'], true)) sayandshapeFail('This file type is not allowed here', 415);
+        $found[$id] = ['id' => $id, 'name' => $meta['name'], 'size' => $meta['size']];
+    }
+    if ($missing) {
+        sayandshapeJsonResponse(['success' => false, 'message' => sayandshapeT('An uploaded file is no longer available. Please add it again.'),
+                                 'missing' => $missing], 410);
+        exit;
+    }
+    // Sent with a job: keep them another day, for follow-up questions and a second try.
+    foreach (array_keys($found) as $id) {
+        @touch(sayandshapeUploadDir() . "/$id.json");
+        @touch(sayandshapeUploadDir() . "/$id.bin");
+    }
+    return array_values($found);
 }

@@ -966,6 +966,93 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(worker.git(self.clone, 'show', '--name-only', '--format=', 'HEAD'), 'style.css')
         self.assertFalse(self.worker.result_path(job).exists())
 
+    def attach(self, upload, name, content):
+        """A finished upload as api/upload.php leaves it; returns its entry for a job's `attachments`."""
+        store = self.worker.jobs / '.uploads'
+        store.mkdir(exist_ok=True)
+        (store / (upload + '.bin')).write_bytes(content)
+        return {'id': upload, 'name': name, 'size': len(content)}
+
+    def test_uploaded_files_reach_the_agent_and_only_what_it_places_is_published(self):
+        files = [self.attach('u_1', 'logo.png', b'PNG-one'), self.attach('u_2', 'logo.png', b'PNG-two'),
+                 self.attach('u_3', 'brief.pdf', b'%PDF' * 400000)]
+        self.app['shared_dirs'] = ['media']
+        worker.atomic_json(self.engine / 'config/apps.json', {'apps': {'demo': self.app}})
+        job, path = self.job(transcript='Put the logo into the header', attachments=files)
+        def edit(space):
+            folder = space / '.sayandshape-uploads'
+            self.assertEqual(sorted(item.name for item in folder.iterdir()), ['brief.pdf', 'logo-2.png', 'logo.png'])
+            self.assertEqual((folder / 'logo-2.png').read_bytes(), b'PNG-two')
+            (space / 'media').mkdir()
+            shutil.copyfile(folder / 'logo.png', space / 'media/logo.png')
+            (space / 'style.css').write_text('header{background:url(media/logo.png)}\n')
+        with self.fake_edit(edit) as run: self.worker.process(path)
+        guard, prompt = [call.kwargs['stdin_text'] for call in run.call_args_list[:2]]
+        self.assertIn('The user attached these files to the instruction, to be used in this application: logo.png, logo.png, brief.pdf. ', guard)
+        self.assertTrue(prompt.startswith('Put the logo into the header\n\nUploaded files: '))
+        self.assertIn('\n- .sayandshape-uploads/logo.png (1 KB)\n- .sayandshape-uploads/logo-2.png (1 KB)\n- .sayandshape-uploads/brief.pdf (1.5 MB)\n', prompt)
+        self.assertIn('served from the live site: media. You may create such a folder here', prompt)
+        self.assertLess(prompt.index('Uploaded files: '), prompt.index('Only change files in this working copy'))
+        status = self.status()
+        self.assertEqual((status['status'], status['files_changed']), ('done', ['media/logo.png', 'style.css']))
+        self.assertEqual((self.clone / 'media/logo.png').read_bytes(), b'PNG-one')
+        self.assertFalse((self.clone / '.sayandshape-uploads').exists())
+        self.assertEqual(worker.git(self.clone, 'show', '--name-only', '--format=%B', 'HEAD').split(), 'Put the logo into the header media/logo.png style.css'.split())
+        self.assertNotIn('sayandshape-uploads', (self.clone / '.git/info/exclude').read_text() if (self.clone / '.git/info/exclude').exists() else '')
+        # The uploads stay for a follow-up request; api/upload.php removes them after a day.
+        self.assertEqual(len(list((self.worker.jobs / '.uploads').glob('u_*.bin'))), 3)
+        self.assertEqual(list(self.worker.runtime.iterdir()), [])
+
+    def test_uploads_left_in_their_folder_are_never_published(self):
+        job, path = self.job(attachments=[self.attach('u_1', 'photo.jpg', b'JPG')])
+        def edit(space):
+            (space / '.sayandshape-uploads/extra.txt').write_text('left behind')
+            worker.git(space, 'add', '-f', '.sayandshape-uploads')
+            worker.git(space, 'commit', '-qm', 'agent commit with the upload folder')
+        with self.fake_edit(edit): self.worker.process(path)
+        self.assertEqual((self.status()['status'], self.status()['commit_hash']), ('done', None))
+        self.assertEqual(worker.git(self.clone, 'rev-parse', 'HEAD'), self.baseline)
+        self.assertFalse((self.clone / '.sayandshape-uploads').exists())
+        # A request without files gets no note and no folder.
+        job, path = self.job()
+        def plain(space):
+            self.assertFalse((space / '.sayandshape-uploads').exists())
+            (space / 'style.css').write_text('body{color:blue}\n')
+        with self.fake_edit(plain) as run: self.worker.process(path)
+        self.assertNotIn('Uploaded files', run.call_args_list[1].kwargs['stdin_text'])
+        self.assertNotIn('attached these files', run.call_args_list[0].kwargs['stdin_text'])
+        self.assertEqual(self.status()['status'], 'done')
+
+    def test_missing_foreign_or_disallowed_uploads_stop_the_job(self):
+        def outcome(**fields):
+            job, path = self.job(**fields)
+            with self.fake_edit(lambda space: (space / 'style.css').write_text('changed\n')): self.worker.process(path)
+            self.assertEqual(worker.git(self.clone, 'rev-parse', 'HEAD'), self.baseline)
+            self.assertEqual(list(self.worker.runtime.iterdir()), [])
+            return self.status()['status'], self.status()['blocked_reason']
+        photo = self.attach('u_1', 'photo.jpg', b'JPG')
+        self.assertEqual(outcome(attachments=[dict(photo, id='u_gone')]),
+                         ('blocked', 'An uploaded file is no longer available. Please add it again.'))
+        self.assertEqual(outcome(attachments=[dict(photo, size=99)])[0], 'blocked')            # not the file that was announced
+        self.assertEqual(outcome(attachments=[self.attach('u_2', 'shell.php', b'<?php')]),
+                         ('blocked', 'Files of the type php are not allowed in this project'))
+        self.app['upload_types'] = ['pdf', 'php']
+        worker.atomic_json(self.engine / 'config/apps.json', {'apps': {'demo': self.app}})
+        self.assertEqual(outcome(attachments=[photo]), ('blocked', 'Files of the type jpg are not allowed in this project'))
+        self.assertEqual(outcome(attachments=[self.attach('u_2', 'shell.php', b'<?php')])[0], 'blocked')   # never, whatever the project lists
+        for bad in ([dict(photo, name='../photo.jpg')], [dict(photo, name='a.php.jpg')], [dict(photo, id='../u_1')], [dict(photo, size='3')],
+                    'u_1', [photo] * 51):
+            self.assertEqual(outcome(attachments=bad), ('failed', 'Invalid attachments'), bad)
+        self.assertEqual(outcome(action='reset', attachments=[photo]), ('failed', 'Invalid attachments'))
+        (self.clone / '.sayandshape-uploads').mkdir()
+        (self.clone / '.sayandshape-uploads/keep.txt').write_text('part of the project')
+        self.commit('project with a folder of that name')
+        self.baseline = worker.git(self.clone, 'rev-parse', 'HEAD')
+        self.app.pop('upload_types')
+        worker.atomic_json(self.engine / 'config/apps.json', {'apps': {'demo': self.app}})
+        self.assertEqual(outcome(attachments=[photo])[0], 'blocked')
+        self.assertTrue((self.clone / '.sayandshape-uploads/keep.txt').exists())
+
     def test_questions_only_result_finishes_without_commit(self):
         job, path = self.job()
         answer = 'Here is the result:\n```json\n{"summary": "I need a decision first.", "questions": [{"text": "Which color?", "options": ["Blue", "Green"]}]}\n```'

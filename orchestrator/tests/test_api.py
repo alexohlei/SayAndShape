@@ -1,6 +1,7 @@
 import http.cookiejar
 import json
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -60,6 +61,16 @@ return false;
         data = raw if raw is not None else json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.url + '/api/' + endpoint, data=data,
                                      headers={'Content-Type': 'application/json'} if data else {})
+        try: res = (client or self.user).open(req, timeout=3)
+        except urllib.error.HTTPError as err: res = err
+        with res:
+            return res.status, json.loads(res.read())
+
+    def upload(self, query, data=b'', client=None, content_type='application/octet-stream', origin=None):
+        """One piece of a file for upload.php, as (status, answer)."""
+        headers = {'Content-Type': content_type}
+        if origin: headers['Origin'] = origin
+        req = urllib.request.Request(self.url + '/api/upload.php?' + query, data=data, headers=headers, method='POST')
         try: res = (client or self.user).open(req, timeout=3)
         except urllib.error.HTTPError as err: res = err
         with res:
@@ -347,6 +358,122 @@ return false;
         code, data = self.request('apps.php', {'id': 'blog', 'remove': True})
         self.assertEqual(code, 200)
         self.assertNotIn('blog', json.loads((self.root / 'config/apps.json').read_text())['apps'])
+
+    def test_upload_limits_and_types_are_saved_per_project(self):
+        base = Path(tempfile.mkdtemp(prefix='sayandshape-app-'))
+        self.addCleanup(shutil.rmtree, base, True)
+        project = lambda **fields: self.request('apps.php', dict({'id': 'blog', 'base_dir': str(base)}, **fields))
+        saved = lambda: json.loads((self.root / 'config/apps.json').read_text())['apps']['blog']
+        code, data = self.request('apps.php')
+        self.assertTrue({'jpg', 'pdf', 'html'} <= set(data['upload_types_default']))
+        self.assertNotIn('php', data['upload_types_default'])
+        # The worker checks against the same two lists.
+        source = (ROOT / 'orchestrator/worker.py').read_text()
+        lists = {name: re.findall(r"'([a-z0-9]+)'", re.search(name + r' = \((.*?)\)', source, re.S).group(1)) for name in ('UPLOAD_TYPES', 'UPLOAD_BLOCKED')}
+        self.assertEqual(lists['UPLOAD_TYPES'], data['upload_types_default'])
+        code, data = project(upload_types=lists['UPLOAD_BLOCKED'][-1:])
+        self.assertEqual(code, 400, data)
+        for blocked in lists['UPLOAD_BLOCKED']:
+            self.assertEqual(project(upload_types=[blocked])[0], 400, blocked)
+        self.assertEqual(project()[0], 200)
+        self.assertEqual((saved()['max_upload_files'], saved()['max_upload_mb'], 'upload_types' in saved()), (10, 25, False))
+        self.assertEqual(project(max_upload_files=0, max_upload_mb=100, upload_types=[' .PDF', 'jpg', 'pdf'])[0], 200)
+        self.assertEqual((saved()['max_upload_files'], saved()['max_upload_mb'], saved()['upload_types']), (0, 100, ['pdf', 'jpg']))
+        # Server code can never be switched on, and the standard list is not stored.
+        code, data = project(upload_types=['jpg', 'php'])
+        self.assertEqual((code, data['message']), (400, 'Files of the type php can never be uploaded'))
+        self.assertEqual(project(upload_types=['a/b'])[0], 400)
+        self.assertEqual(saved()['upload_types'], ['pdf', 'jpg'])
+        standard = self.request('apps.php')[1]['upload_types_default']
+        self.assertEqual(project(upload_types=list(reversed(standard)))[0], 200)
+        self.assertNotIn('upload_types', saved())
+        self.assertEqual(project(upload_types=['pdf'])[0], 200)
+        self.assertEqual(project(upload_types=[])[0], 200)
+        self.assertNotIn('upload_types', saved())
+        for bad in ({'max_upload_files': 51}, {'max_upload_files': -1}, {'max_upload_mb': 0}, {'max_upload_mb': 201}, {'max_upload_mb': '25'}):
+            self.assertEqual(project(**bad)[0], 400, bad)
+
+    def test_files_upload_in_pieces_and_attach_to_a_change(self):
+        store = self.root / 'jobs/.uploads'
+        self.assertEqual(self.request('upload.php?app_id=demo', client=self.anon)[0], 401)
+        self.assertEqual(self.upload('app_id=demo&name=a.jpg&size=1', b'1', client=self.anon)[0], 401)
+        code, limits = self.request('upload.php?app_id=demo')
+        self.assertEqual((code, limits['max_files'], limits['max_bytes'], limits['chunk_bytes']), (200, 10, 25 * 1048576, 524288))
+        self.assertTrue({'jpg', 'pdf', 'html', 'css', 'js'} <= set(limits['types']))
+        self.assertFalse({'php', 'phtml', 'htaccess', 'sh'} & set(limits['types']))
+        self.assertEqual(self.request('upload.php?app_id=nope')[0], 400)
+        # Only raw data from this site: a form of another site can send neither this content type nor this origin.
+        self.assertEqual(self.upload('app_id=demo&name=a.jpg&size=1', b'1', content_type='text/plain')[0], 403)
+        self.assertEqual(self.upload('app_id=demo&name=a.jpg&size=1', b'1', origin='https://evil.example')[0], 403)
+        self.assertFalse(store.exists())
+
+        code, first = self.upload('app_id=demo&name=B%C3%BCro%20Foto.final.JPG&size=10', b'01234')
+        self.assertEqual((code, first['name'], first['received'], first['complete']), (200, 'Buero-Foto-final.jpg', 5, False))
+        upload = first['id']
+        change = {'app_id': 'demo', 'workspace': 'main', 'transcript': 'Use the photo', 'attachments': [upload]}
+        code, data = self.request('submit.php', change)
+        self.assertEqual((code, data['missing']), (410, [upload]))                      # not finished yet
+        code, data = self.upload(f'id={upload}&offset=3', b'34567')
+        self.assertEqual((code, data['received']), (409, 5))                            # out of order: continue at 5
+        self.assertEqual(self.upload(f'id={upload}&offset=5', b'567890')[0], 400)       # more than announced
+        self.assertEqual(self.upload(f'id={upload}&offset=5')[0], 400)                  # a piece without data
+        self.assertEqual((store / (upload + '.bin')).read_bytes(), b'01234')
+        code, data = self.upload(f'id={upload}&offset=5', b'56789')
+        self.assertEqual((code, data['received'], data['complete']), (200, 10, True))
+        self.assertEqual((store / (upload + '.bin')).read_bytes(), b'0123456789')
+        self.assertEqual(self.upload(f'id={upload}&offset=10')[1]['complete'], True)    # repeated last piece
+
+        for name, status in (('shell.php', 415), ('page.phtml', 415), ('.htaccess', 415), ('noending', 415), ('archive.zip', 415)):
+            self.assertEqual(self.upload(f'app_id=demo&name={name}&size=1', b'1')[0], status, name)
+        code, data = self.upload('app_id=demo&name=..%2F..%2Fx.php.png&size=1', b'1')
+        self.assertEqual((code, data['name']), (200, 'x-php.png'))                      # one ending, no path
+        second = data['id']
+        self.assertEqual(self.upload('app_id=demo&name=a.jpg&size=0')[0], 400)
+        self.assertEqual(self.upload(f'app_id=demo&name=a.jpg&size={25 * 1048576 + 1}', b'1')[0], 413)
+        self.assertEqual(self.upload('app_id=nope&name=a.jpg&size=1', b'1')[0], 400)
+
+        # An upload belongs to the user and project it was made for.
+        for foreign, facts in (('u_foreign_user', {'user_id': 2, 'app_id': 'demo'}), ('u_foreign_app', {'user_id': 1, 'app_id': 'other'})):
+            (store / (foreign + '.bin')).write_bytes(b'x')
+            (store / (foreign + '.json')).write_text(json.dumps(dict(facts, id=foreign, name='x.png', size=1, complete=True)))
+            self.assertEqual(self.request('submit.php', dict(change, attachments=[foreign]))[0], 410)
+        self.assertEqual(self.upload('id=u_foreign_user&remove=1')[0], 404)
+        self.assertTrue((store / 'u_foreign_user.bin').exists())
+        for bad in ('u_x', ['../x'], [7], {'a': upload}):
+            self.assertEqual(self.request('submit.php', dict(change, attachments=bad))[0], 400, bad)
+        self.assertEqual(list((self.root / 'jobs').glob('j_*.json')), [])
+
+        code, data = self.request('submit.php', dict(change, attachments=[upload, second, upload]))
+        self.assertEqual(code, 202, data)
+        expected = [{'id': upload, 'name': 'Buero-Foto-final.jpg', 'size': 10}, {'id': second, 'name': 'x-php.png', 'size': 1}]
+        self.assertEqual(json.loads((self.root / 'jobs' / (data['job_id'] + '.json')).read_text())['attachments'], expected)
+        self.assertEqual(self.request('status.php?job_id=' + data['job_id'])[1]['status']['attachments'], expected)
+
+        # Discarded by the panel, or left over for more than a day: gone.
+        self.assertEqual(self.upload(f'id={second}&remove=1')[0], 200)
+        self.assertFalse((store / (second + '.bin')).exists() or (store / (second + '.json')).exists())
+        self.assertEqual(self.upload(f'id={second}&offset=0', b'1')[0], 404)
+        import os
+        for name in (upload + '.json', upload + '.bin', 'u_foreign_app.json', 'u_foreign_app.bin'):
+            os.utime(store / name, (time.time() - 90000, time.time() - 90000))
+        self.assertEqual(self.upload('app_id=demo&name=new.css&size=2', b'ab')[0], 200)
+        self.assertEqual(sorted(path.name for path in store.glob('u_foreign*')), ['u_foreign_user.bin', 'u_foreign_user.json'])
+        self.assertFalse((store / (upload + '.bin')).exists())
+
+        # The project's own limits and types.
+        config = json.loads((self.root / 'config/apps.json').read_text())
+        config['apps']['demo'].update(max_upload_files=1, max_upload_mb=1, upload_types=['PDF', 'php'])
+        (self.root / 'config/apps.json').write_text(json.dumps(config))
+        code, limits = self.request('upload.php?app_id=demo')
+        self.assertEqual((limits['max_files'], limits['max_bytes'], limits['types']), (1, 1048576, ['pdf']))
+        self.assertEqual(self.upload('app_id=demo&name=a.jpg&size=1', b'1')[0], 415)
+        self.assertEqual(self.upload('app_id=demo&name=a.php&size=1', b'1')[0], 415)
+        self.assertEqual(self.upload(f'app_id=demo&name=a.pdf&size={1048577}', b'1')[0], 413)
+        ids = [self.upload('app_id=demo&name=a.pdf&size=1', b'1')[1]['id'] for _ in range(2)]
+        self.assertEqual(self.request('submit.php', dict(change, workspace='main', attachments=ids))[0], 400)   # more than one file
+        config['apps']['demo']['max_upload_files'] = 0
+        (self.root / 'config/apps.json').write_text(json.dumps(config))
+        self.assertEqual(self.upload('app_id=demo&name=a.pdf&size=1', b'1')[0], 403)
 
     def test_discuss_enqueues_reads_and_clears_chat(self):
         self.assertEqual(self.request('discuss.php?app_id=demo&workspace=main', client=self.anon)[0], 401)

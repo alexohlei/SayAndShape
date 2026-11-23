@@ -99,6 +99,7 @@ the people who own the site make those changes themselves, right on the page the
 and nobody has to fear breaking it:
 
 - **Talk to the page.** Speak or type the change in a panel on the live site. No CMS, no build step.
+- **Bring your files.** Drop photos, a logo or a PDF onto the panel; the agent puts them where they belong on the site.
 - **Nothing breaks for good.** Every change is a Git commit. Undo any single change, reset, or set a new baseline.
 - **Try before it goes live.** Variants are full copies at `/w/<name>/`. Experiment in parallel, then merge into the live site.
 - **Checked three times, fenced in once.** A pattern filter and an AI guardrail check the request, the agent works in a sandbox that lets it write to a copy of the site and nowhere else, and a diff review checks the result before it is published.
@@ -110,7 +111,7 @@ and nobody has to fear breaking it:
 
 | Who | What they say |
 |---|---|
-| **Small businesses** keeping their own site current | "Change Saturday's opening hours to 9 to 2." · "Add a banner: closed 24–26 December." · "Put the new seasonal latte on the products page." |
+| **Small businesses** keeping their own site current | "Change Saturday's opening hours to 9 to 2." · "Add a banner: closed 24–26 December." · "Put the new seasonal latte on the products page." · Drop a photo and the new menu as a PDF onto the panel: "Use the photo on the start page and link the menu below it." |
 | **Agencies and freelancers** handing a site to a client | The client makes everyday edits in a variant; the agency looks at `/w/client-edits/` and merges what is good. Every change carries the name of the person who made it. |
 | **Designers and product teams** exploring ideas | "Switch the accent color to a deep forest green." in variant `green`, a different layout in variant `wide`; compare them side by side and keep the winner. |
 | **Live sessions and workshops** | Change the page while everybody watches, by voice, and undo with one click if the idea doesn't work. |
@@ -171,7 +172,7 @@ Two requests: *"Rename the café to “Harbour Lane Coffee” and change the sma
 
 ```mermaid
 flowchart LR
-    A["Voice or text<br/>in the panel"] --> B["Pattern filter"]
+    A["Voice or text in the panel,<br/>files if needed"] --> B["Pattern filter"]
     B --> C["AI guardrail<br/>read-only check"]
     C --> D["Claude Code or Codex<br/>edits a temporary copy<br/>inside a sandbox"]
     D --> E["Diff review<br/>paths, patterns, file limit"]
@@ -182,7 +183,8 @@ flowchart LR
 1. A small router in the project inserts the panel into the pages, for logged-in browsers only.
    Visitors see the site as before.
 2. A request becomes a job in a file queue. One job per variant at a time; different variants run in
-   parallel.
+   parallel. Files dropped onto the panel (images, documents, styles; no server code) travel with the
+   request, and the agent copies them to where they belong on the site.
 3. The worker checks the request (pattern filter, then a read-only AI guardrail against the
    project's rules), copies the variant into a temporary working copy and lets the agent edit it there.
    The agent runs in its own sandbox: it may change and delete files in that copy, but it cannot write
@@ -218,7 +220,8 @@ plain: no MCP servers, plugins, hooks or extra writable folders. Keep the CLI up
 
 **Say what may be changed.** `allowed_changes` describes the editable surface in one sentence,
 `extra_blocked_files` protects files such as `.env` or `config.php`, `max_files_per_change` limits
-the size of a change (all in [AGENTS.md](AGENTS.md)). Serve the login over HTTPS and choose a strong
+the size of a change, `upload_types` names the kinds of files people may attach to a request (server
+code such as PHP is never among them; all in [AGENTS.md](AGENTS.md)). Serve the login over HTTPS and choose a strong
 password: everyone who has it can give the agent instructions.
 
 **Keep backups** of the project folder and of `clones/` somewhere the server cannot reach.
@@ -279,7 +282,7 @@ sayandshape-router.php        bin/sayandshape   CLI: init, agent, add, remove, l
 .htaccess block (Apache)      router/router.php front controller: engine routes, variants, panel injection
                               login/index.php   engine login (/sayandshape/login/)
   /sayandshape/login/         setup/index.php   project setup (/sayandshape/setup/)
-  /sayandshape/api/*          api/              login, queue, status, history, variants, discuss, setup
+  /sayandshape/api/*          api/              login, queue, uploads, status, history, variants, discuss, setup
                                 i18n.php        German texts for the PHP side (English is the key)
   /sayandshape/widget/*       widget/           the panel (sayandshape-widget.js / .css)
   /w/{variant}/*              orchestrator/
@@ -292,7 +295,7 @@ sayandshape-router.php        bin/sayandshape   CLI: init, agent, add, remove, l
                               config/apps.json  projects, language and agent settings (created by init)
                               config/auth.json  password hash (created by passwd)
                               .agent-keys.json  optional API key of the AI agent (created by agent)
-                              jobs/             file queue and locks
+                              jobs/             file queue, locks and files uploaded with a request
                               docs/             logo and the screenshots in this README
                               clones/<project>/<variant>/   one Git repository per variant
 ```

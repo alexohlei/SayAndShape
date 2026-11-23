@@ -38,6 +38,12 @@ DE = {
     'Invalid source variant': 'Ungültige Ausgangs-Variante',
     'Invalid name': 'Ungültiger Name',
     'Invalid author': 'Ungültiger Autor',
+    'Invalid attachments': 'Ungültige Anhänge',
+    'The project already contains "{name}"; files cannot be attached here':
+        'Das Projekt enthält bereits „{name}“; hier können keine Dateien angehängt werden',
+    'Files of the type {type} are not allowed in this project': 'Dateien vom Typ {type} sind in diesem Projekt nicht erlaubt',
+    'An uploaded file is no longer available. Please add it again.':
+        'Eine hochgeladene Datei ist nicht mehr vorhanden. Bitte erneut hinzufügen.',
     'Job cancelled': 'Auftrag abgebrochen',
     'Prompt check failed': 'Prompt-Prüfung fehlgeschlagen',
     'No usable answer received; please ask again': 'Keine verwertbare Antwort erhalten; bitte erneut fragen',

@@ -7,7 +7,8 @@ It needs Git, Bash, jq, PHP and a signed-in AI agent (`claude` or `codex`).
 ## Flow
 
 - `submit.php`, `rollback.php`, `reset.php`, `baseline.php`, `fork.php`,
-  `delete_workspace.php` and `rename_workspace.php` write jobs atomically. Every job
+  `delete_workspace.php` and `rename_workspace.php` write jobs atomically. `upload.php`
+  stores files for a change request beforehand (see "Files with a request"). Every job
   belongs to a variant (`workspace`). One active job per variant is allowed; further
   requests get HTTP 409 and the ID of the job that is already active.
 - A worker lock prevents several daemons for the same queue. The daemon is a
@@ -139,6 +140,37 @@ tells the AI to write all of this in the language of the request.
 ambiguous requests the AI changes nothing and only asks follow-up questions (`done` without
 `commit_hash`, no reload); the answers are sent together with the original request as a new
 job. Follow-up questions after a change has been made start a follow-up job.
+
+**Files with a request.** Below the text field of Edit is a drop area: files are dropped onto it
+(or anywhere in the view) or chosen in the file dialog it opens, several at once. The panel sends
+each file right away to `upload.php` in pieces of 512 KB, so no request exceeds PHP's
+`post_max_size` or Nginx's `client_max_body_size`, and lists it with its size, its progress or
+the reason it was refused. "Apply change" waits for running uploads.
+
+- `upload.php`: `GET ?app_id=` returns `max_files`, `max_bytes`, `types` and `chunk_bytes`.
+  `POST` with `Content-Type: application/octet-stream` carries one piece: `?app_id=&name=&size=`
+  starts an upload and answers with its `id` and stored name, `?id=&offset=` continues it (409
+  with `received` when the offset does not fit), `?id=&remove=1` discards it. Files are stored as
+  `jobs/.uploads/<id>.bin` with their facts in `<id>.json` and belong to the user and project
+  they were made for. Names are reduced to letters, digits, `-` and `_` with a single ending
+  (`Büro Foto.final.JPG` becomes `Buero-Foto-final.jpg`).
+- `submit.php` takes the IDs as `attachments`; the job stores `[{id, name, size}]` from the
+  stored facts and the status returns them. A missing upload answers 410 with `missing`.
+- The worker names the files to the guardrail, then copies them into `.sayandshape-uploads/` of
+  the job's working copy and appends their paths to the editing prompt: the agent copies what
+  belongs on the site to a fitting place (also into a folder listed in `shared_dirs`, which a
+  variant may hold on top of the app's) and only reads what serves as a template. The folder is
+  removed before the diff review and ignored by Git in the working copy, so only files the agent
+  placed are reviewed, committed and published; they count towards `max_files_per_change`.
+- Uploads stay for a day after they were last sent with a request: when the agent only asks
+  questions, the answers go out with the same files, and a rejected request returns them to the
+  list. `upload.php` removes older ones when a new upload starts.
+- Per project: `max_upload_files` (default 10, 0 hides the drop area), `max_upload_mb`
+  (default 25, at most 200) and `upload_types` (file endings; default: images, video, audio,
+  fonts, documents, HTML, CSS and JavaScript). Types a web server may run or read as
+  configuration (`php`, `phtml`, `cgi`, `sh`, `htaccess`, …) are refused by the setup page, the
+  API and the worker whatever the list says: an upload reaches the project byte for byte, and
+  the guardrail judges the request, not the file.
 
 **Discuss.** `discuss.php`: `GET` returns the variant's chat, `POST {message}` queues a
 `discuss` job, `POST {clear: true}` clears the chat (409 while a question is running). The job

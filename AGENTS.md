@@ -58,6 +58,9 @@ script tag is inserted on the fly for logged-in browsers.
 - Admins also get `/sayandshape/setup/`, a page to register and configure projects without editing
   JSON by hand
 - Voice input fills an editable text field; clicking Send (or Ctrl/Cmd+Enter) submits it
+- Files can be attached to a request: dropped onto the area below the text field or chosen in the
+  file dialog, several at once. The AI agent gets them with the request, copies what belongs on
+  the site to a fitting place and uses it there; see "Files with a request" in `orchestrator/README.md`
 - The AI agent (Claude or Codex) modifies a temporary working copy and publishes it only after successful review
 - The widget reloads the page when the job completes
 - Users can roll back approved independent changes (the newest is always eligible),
@@ -92,6 +95,7 @@ Written by `bin/sayandshape add` and the setup page. Per project (`apps.<id>`):
 | `allowed_origins` | additional origins that may call the API (also possible at the top level) |
 | `auto_commit_host_changes` | commit files the app itself writes into a variant before a job instead of refusing the job (default true) |
 | `max_files_per_change`, `extra_blocked_files`, `extra_blocked_patterns` | limits and protected files for the diff review and the prompt filter |
+| `max_upload_files`, `max_upload_mb`, `upload_types` | files people may attach to a request: how many (default 10, `0` switches uploads off), how large each (default 25 MB, at most 200) and which file endings (default: images, video, audio, fonts, documents, `html`, `css`, `js`). Server code such as `php` is never accepted |
 
 Top level: `max_parallel_jobs` (jobs at once across all projects, never more than one per variant),
 `language` (`en`, the default, or `de`: interface language of the panel, login, setup page, API and
@@ -232,6 +236,8 @@ Every change passes through three checks before it is committed:
    What users may change comes from the project's `allowed_changes` sentence; the fixed part of
    the prompt lives in `Worker.process_locked()` in `worker.py`. The AI engine, model and effort
    come from `agent` in `config/apps.json`.
+   Files attached to the request are named to it; their content is not judged here. That is
+   why only the file types of `upload_types` are accepted and server code never is.
 3. **Diff review** (`orchestrator/safety/diff_review.py`, also available through
    `diff-review.sh`) — checks changes against the fixed baseline, blocked paths,
    dangerous patterns (code that runs programs on the server, such as `system`, `shell_exec`
@@ -388,6 +394,10 @@ engine, login and worker serve all projects; the worker picks up configuration c
 | Launcher sits off-screen after a window resize | Saved anchor outside the viewport | It is clamped on the next resize/open; otherwise clear `sayandshape:…:anchor` in localStorage |
 | Clone contains uncommitted changes | Existing edits are protected | Review and resolve those edits before resubmitting |
 | `git` "dubious ownership" / permission denied on rollback | Web server & daemon are different users | Set up shared group + setgid + `safe.directory` (see "File ownership & git permissions") |
+| No drop area for files below the text field | `max_upload_files` is 0, `upload_types` is empty, or the engine's `api/upload.php` is missing | Set them on `/sayandshape/setup/` ("Advanced"); update the engine |
+| A file is refused ("This file type is not allowed here", "too large") | Not in the project's `upload_types`, a type that is never accepted (`php`, …), or larger than `max_upload_mb` | Adjust the project on `/sayandshape/setup/`; put server code into the project yourself |
+| "Upload could not be saved" | The web server user cannot write `jobs/.uploads/` | Same shared group and permissions as `jobs/` (see "File ownership & git permissions") |
+| "An uploaded file is no longer available" | The upload is older than a day or was removed | Add the file again |
 | Mic button does nothing | Speech API unavailable or permission denied | Use the text field; check microphone permissions and HTTPS |
 
 ## Template regression checks

@@ -15,6 +15,8 @@
       "shared_dirs": ["media"],
       "allowed_changes": "Behavior, appearance, layout, colors, animations, texts and content of the application",
       "max_files_per_change": 20,
+      "max_upload_files": 10,
+      "max_upload_mb": 25,
       "auto_commit_host_changes": true,
       "extra_blocked_patterns": [],
       "extra_blocked_files": [".env", "config.php", ".htaccess", "sayandshape-router.php"]

@@ -56,7 +56,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
     }
     sayandshapeJsonResponse(['success' => true, 'engine_dir' => sayandshapeEngineDir(),
         'max_parallel_jobs' => (int) ($config['max_parallel_jobs'] ?? 1), 'daemon_running' => sayandshapeDaemonRunning(),
-        'config_writable' => is_writable($configPath) && is_writable(dirname($configPath)), 'apps' => $apps]);
+        'config_writable' => is_writable($configPath) && is_writable(dirname($configPath)),
+        'upload_types_default' => SAYANDSHAPE_UPLOAD_TYPES, 'apps' => $apps]);
     exit;
 }
 
@@ -96,6 +97,26 @@ $app['extra_blocked_patterns'] = sayandshapeListField($body, $existing, 'extra_b
 $maxFiles = $body['max_files_per_change'] ?? $existing['max_files_per_change'] ?? 20;
 if (!is_int($maxFiles) || $maxFiles < 1 || $maxFiles > 200) sayandshapeFail('Files per change: 1 to 200');
 $app['max_files_per_change'] = $maxFiles;
+// Files people attach to a request (api/upload.php): how many, how large, which types.
+$uploadFiles = $body['max_upload_files'] ?? $existing['max_upload_files'] ?? 10;
+if (!is_int($uploadFiles) || $uploadFiles < 0 || $uploadFiles > 50) sayandshapeFail('Uploads per request: 0 to 50');
+$app['max_upload_files'] = $uploadFiles;
+$uploadMb = $body['max_upload_mb'] ?? $existing['max_upload_mb'] ?? 25;
+if (!is_int($uploadMb) || $uploadMb < 1 || $uploadMb > 200) sayandshapeFail('Upload size: 1 to 200 MB');
+$app['max_upload_mb'] = $uploadMb;
+if (array_key_exists('upload_types', $body)) {
+    $types = [];
+    foreach (sayandshapeListField($body, $existing, 'upload_types', 200, false) as $type) {
+        $type = strtolower(ltrim($type, '.'));
+        if (!preg_match('/^[a-z0-9]{1,10}$/D', $type)) sayandshapeFail('Upload types: only file endings such as jpg or pdf');
+        if (in_array($type, SAYANDSHAPE_UPLOAD_BLOCKED, true)) sayandshapeFail('Files of the type {type} can never be uploaded', 400, ['type' => $type]);
+        $types[] = $type;
+    }
+    $types = array_values(array_unique($types));
+    // The standard list is not stored, so a project without a list of its own follows later versions of it.
+    $standard = !$types || (!array_diff($types, SAYANDSHAPE_UPLOAD_TYPES) && !array_diff(SAYANDSHAPE_UPLOAD_TYPES, $types));
+    if ($standard) unset($app['upload_types']); else $app['upload_types'] = $types;
+}
 $auto = $body['auto_commit_host_changes'] ?? $existing['auto_commit_host_changes'] ?? true;
 if (!is_bool($auto)) sayandshapeFail('auto_commit_host_changes must be true or false');
 $app['auto_commit_host_changes'] = $auto;

@@ -54,6 +54,9 @@
   let historyButtons = [];
   let variantButtons = [];
   let answerButtons = [];
+  let uploadLimits = null;        // what the project accepts (upload.php): { max_files, max_bytes, types, chunk_bytes }
+  let attachments = [];           // files for the next request: { id, name, size, sent, state: queued|uploading|done|error, error, file }
+  let uploading = false;
   let lang = 'en';                // interface language from session.php ('en' | 'de'); the panel is built after it is known
 
   /* ── Interface language ──────────────────────────────── */
@@ -79,6 +82,14 @@
       changeLabel: 'What should change?', changeAria: 'Describe the change',
       changePlaceholder: 'For example: Make the background dark blue and the headings a bit larger',
       changeReview: 'Check the text, then send it with “Apply change”', applyChange: 'Apply change',
+      dropFiles: 'Add files: drop them here or click to choose', dropNow: 'Drop the files here',
+      dropHint: 'Up to {count} files, {size} MB each', removeFile: 'Remove {name}',
+      fileWaiting: 'waiting…', uploadFailed: 'Upload failed',
+      fileTypeNotAllowed: '“{name}”: this file type is not allowed here.', fileTooLarge: '“{name}” is larger than {size} MB.',
+      fileEmpty: '“{name}” is empty.', filesTooMany: 'At most {count} files per request.',
+      uploadsRunning: 'Files are still uploading. Please wait a moment.',
+      uploadsFailed: 'First remove the files that could not be uploaded.',
+      attachedFiles: 'Files: {files}',
       scopeHelp: 'Where does the change go?',
       scopePublic: 'This is the public variant. Visitors see changes as soon as they are applied.',
       scopeVariant: 'The change only goes into the variant “{name}”. The public variant stays unchanged until you merge it.',
@@ -170,6 +181,14 @@
       changeLabel: 'Was soll sich ändern?', changeAria: 'Änderung beschreiben',
       changePlaceholder: 'Zum Beispiel: Mach den Hintergrund dunkelblau und die Überschriften etwas größer',
       changeReview: 'Text prüfen und mit „Änderung starten“ losschicken', applyChange: 'Änderung starten',
+      dropFiles: 'Dateien anhängen: hierher ziehen oder klicken', dropNow: 'Dateien hier ablegen',
+      dropHint: 'Bis zu {count} Dateien, je {size} MB', removeFile: '{name} entfernen',
+      fileWaiting: 'wartet…', uploadFailed: 'Hochladen fehlgeschlagen',
+      fileTypeNotAllowed: '„{name}“: Dieser Dateityp ist hier nicht erlaubt.', fileTooLarge: '„{name}“ ist größer als {size} MB.',
+      fileEmpty: '„{name}“ ist leer.', filesTooMany: 'Höchstens {count} Dateien pro Anfrage.',
+      uploadsRunning: 'Dateien werden noch hochgeladen. Bitte kurz warten.',
+      uploadsFailed: 'Entferne zuerst die Dateien, die nicht hochgeladen werden konnten.',
+      attachedFiles: 'Dateien: {files}',
       scopeHelp: 'Wo landet die Änderung?',
       scopePublic: 'Das ist die öffentliche Variante. Besucher sehen Änderungen sofort, nachdem sie übernommen wurden.',
       scopeVariant: 'Die Änderung landet nur in der Variante „{name}“. Die öffentliche Variante bleibt unverändert, bis du sie übernimmst.',
@@ -363,7 +382,9 @@
     send: '<svg width="15" height="15" viewBox="0 0 24 24"' + STROKE + '<path d="M5 12h14M13 6l6 6-6 6"/></svg>',
     trash: '<svg width="13" height="13" viewBox="0 0 24 24"' + STROKE + '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
     question: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 9a3 3 0 1 1 4.2 2.8c-.8.4-1.2 1-1.2 1.9"/><circle cx="12" cy="18" r=".7" fill="currentColor"/></svg>',
-    spark: '<svg width="13" height="13" viewBox="0 0 24 24"' + STROKE + '<path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z"/></svg>'
+    spark: '<svg width="13" height="13" viewBox="0 0 24 24"' + STROKE + '<path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z"/></svg>',
+    upload: '<svg width="18" height="18" viewBox="0 0 24 24"' + STROKE + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>',
+    clip: '<svg width="13" height="13" viewBox="0 0 24 24"' + STROKE + '<path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>'
   };
   function iconSpan(name, cls) {
     const span = mk('span', 'rs-icon' + (cls ? ' ' + cls : ''));
@@ -606,6 +627,8 @@
     applyLayout();
 
     ui.changeBox.setDraft(stored('draft') || '');
+    restoreAttachments(storedAttachments());
+    loadUploadLimits();
     ui.chatBox.setDraft(stored('chatdraft') || '');
     const once = onceFlag('tab');
     if (once) onceFlag('tab', null);
@@ -666,6 +689,57 @@
       reviewHint: t('changeReview')
     });
     ui.changeBox = box; ui.input = box.input;
+
+    // Files for the request: a drop area that also opens the file dialog, and the list of what was added.
+    // Hidden until upload.php has said what the project accepts.
+    const files = mk('div', 'rs-files');
+    files.id = 'sayandshape-files';
+    files.hidden = true;
+    const drop = mk('button', 'rs-drop');
+    drop.id = 'sayandshape-drop';
+    drop.type = 'button';
+    const dropText = mk('span', 'rs-drop-text');
+    const dropLabel = mk('span', '', t('dropFiles'));
+    const dropHint = mk('span', 'rs-drop-hint');
+    dropText.append(dropLabel, dropHint);
+    drop.append(iconSpan('upload'), dropText);
+    const picker = document.createElement('input');
+    picker.id = 'sayandshape-file-input';
+    picker.type = 'file';
+    picker.multiple = true;
+    picker.hidden = true;
+    picker.tabIndex = -1;
+    drop.addEventListener('click', function () { picker.click(); });
+    picker.addEventListener('change', function () { addFiles(picker.files); picker.value = ''; });
+    const fileList = mk('ul', 'rs-file-list');
+    fileList.id = 'sayandshape-file-list';
+    fileList.hidden = true;
+    const fileNote = mk('div', 'rs-file-note');
+    fileNote.id = 'sayandshape-file-note';
+    fileNote.setAttribute('role', 'status');
+    files.append(drop, picker, fileList, fileNote);
+    ui.files = files; ui.drop = drop; ui.dropLabel = dropLabel; ui.dropHint = dropHint; ui.picker = picker;
+    ui.fileList = fileList; ui.fileNote = fileNote;
+    // Dropping works anywhere in this view, also onto the text field.
+    let dragDepth = 0;
+    const dragsFiles = function (e) {
+      const types = e && e.dataTransfer && e.dataTransfer.types;
+      return !!types && !ui.files.hidden && Array.prototype.indexOf.call(types, 'Files') >= 0;
+    };
+    const dropActive = function (on) {
+      drop.className = 'rs-drop' + (on ? ' rs-drop-active' : '');
+      dropLabel.textContent = t(on ? 'dropNow' : 'dropFiles');
+    };
+    view.addEventListener('dragenter', function (e) { if (dragsFiles(e)) { e.preventDefault(); dragDepth++; dropActive(true); } });
+    view.addEventListener('dragover', function (e) { if (dragsFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+    view.addEventListener('dragleave', function () { if (dragDepth && --dragDepth === 0) dropActive(false); });
+    view.addEventListener('drop', function (e) {
+      if (!dragsFiles(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      dropActive(false);
+      addFiles(e.dataTransfer.files);
+    });
 
     const row = mk('div', 'rs-row');
     const send = textButton(t('applyChange'), 'rs-btn-primary rs-grow');
@@ -741,7 +815,7 @@
     author.append(authorText, chip, authorInput);
     ui.authorChip = chip; ui.authorInput = authorInput;
 
-    view.append(labelRow, scope, box.wrap, box.micLabel, row, statusWrap, result, last, author);
+    view.append(labelRow, scope, box.wrap, box.micLabel, files, row, statusWrap, result, last, author);
     return view;
   }
 
@@ -1077,7 +1151,7 @@
 
   function updateControls() {
     const lock = busy || isRecording;
-    ui.send.disabled = lock;
+    ui.send.disabled = lock || uploading;
     ui.chatSend.disabled = lock;
     [ui.changeBox, ui.chatBox].forEach(function (box) {
       box.mic.disabled = busy || (isRecording && rec !== box);
@@ -1145,7 +1219,10 @@
 
   function sendText() {
     const v = ui.input.value.trim();
-    if (v && !busy && !isRecording) submitChange(v);
+    if (!v || busy || isRecording) return;
+    if (attachments.some(function (entry) { return entry.state === 'queued' || entry.state === 'uploading'; })) { toast(t('uploadsRunning'), 'info'); return; }
+    if (attachments.some(function (entry) { return entry.state === 'error'; })) { toast(t('uploadsFailed'), 'error'); return; }
+    submitChange(v, attachments);
   }
 
   function toggleMic(box) {
@@ -1243,6 +1320,189 @@
     if (recording) rec.micLabel.textContent = t('recording');
   }
 
+  /* ── Files for a request ─────────────────────────────── */
+
+  // Finished uploads survive a reload like the draft does; the files themselves wait on the server.
+  function storedAttachments() {
+    try {
+      const list = JSON.parse(stored('files') || '[]');
+      return Array.isArray(list) ? list : [];
+    } catch (err) { return []; }
+  }
+
+  function saveAttachments() {
+    const done = attachments.filter(function (entry) { return entry.state === 'done'; })
+      .map(function (entry) { return { id: entry.id, name: entry.name, size: entry.size }; });
+    stored('files', done.length ? JSON.stringify(done) : null);
+  }
+
+  function restoreAttachments(list) {
+    attachments = (Array.isArray(list) ? list : []).filter(function (entry) {
+      return entry && typeof entry.id === 'string' && typeof entry.name === 'string';
+    }).map(function (entry) { return { id: entry.id, name: entry.name, size: Number(entry.size) || 0, sent: 0, state: 'done' }; });
+    saveAttachments();
+    renderFiles();
+  }
+
+  // Sent with a request, or gone on the server: off the list. The uploads stay on the server for the job.
+  function forgetAttachments(ids) {
+    if (!ids || !ids.length) return;
+    attachments = attachments.filter(function (entry) { return ids.indexOf(entry.id) < 0; });
+    saveAttachments();
+    renderFiles();
+  }
+
+  async function loadUploadLimits() {
+    try {
+      const data = await request('/upload.php?app_id=' + encodeURIComponent(APP_ID));
+      uploadLimits = data.max_files > 0 && Array.isArray(data.types) && data.types.length ? data : null;
+    } catch (err) { uploadLimits = null; }
+    if (uploadLimits) {
+      ui.picker.accept = uploadLimits.types.map(function (type) { return '.' + type; }).join(',');
+      ui.dropHint.textContent = t('dropHint', { count: uploadLimits.max_files, size: megabytes(uploadLimits.max_bytes) });
+    }
+    renderFiles();
+  }
+
+  function megabytes(bytes) { return Math.floor(bytes / 1048576); }
+
+  function sizeText(bytes) {
+    if (bytes < 1048576) return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+    return (bytes / 1048576).toLocaleString(lang, { maximumFractionDigits: 1 }) + ' MB';
+  }
+
+  function fileInfo(entry) {
+    if (entry.state === 'error') return entry.error;
+    if (entry.state === 'queued') return t('fileWaiting');
+    if (entry.state === 'uploading') return Math.floor(entry.sent / entry.size * 100) + ' %';
+    return entry.size ? sizeText(entry.size) : '';
+  }
+
+  function renderFiles() {
+    ui.files.hidden = !uploadLimits;
+    empty(ui.fileList);
+    attachments.forEach(function (entry) {
+      const row = mk('li', 'rs-file' + (entry.state === 'error' ? ' rs-file-error' : ''));
+      const name = mk('span', 'rs-file-name', entry.name);
+      name.title = entry.name;
+      entry.info = mk('span', 'rs-file-info', fileInfo(entry));
+      const remove = iconButton('x', t('removeFile', { name: entry.name }), 'rs-file-remove');
+      remove.addEventListener('click', function () { removeAttachment(entry); });
+      row.append(iconSpan('clip'), name, entry.info, remove);
+      ui.fileList.appendChild(row);
+    });
+    ui.fileList.hidden = !attachments.length;
+    ui.drop.disabled = !uploadLimits || attachments.length >= uploadLimits.max_files;
+  }
+
+  // Checked here for a quick answer; upload.php checks the same again.
+  function addFiles(list) {
+    if (!uploadLimits) return;
+    const problems = [];
+    Array.prototype.slice.call(list || []).forEach(function (file) {
+      const dot = file.name.lastIndexOf('.');
+      const type = dot < 0 ? '' : file.name.slice(dot + 1).toLowerCase();
+      let problem = '';
+      if (attachments.length >= uploadLimits.max_files) problem = t('filesTooMany', { count: uploadLimits.max_files });
+      else if (uploadLimits.types.indexOf(type) < 0) problem = t('fileTypeNotAllowed', { name: file.name });
+      else if (!file.size) problem = t('fileEmpty', { name: file.name });
+      else if (file.size > uploadLimits.max_bytes) problem = t('fileTooLarge', { name: file.name, size: megabytes(uploadLimits.max_bytes) });
+      if (problem) { if (problems.indexOf(problem) < 0) problems.push(problem); return; }
+      attachments.push({ id: null, name: file.name, size: file.size, sent: 0, state: 'queued', file: file });
+    });
+    ui.fileNote.textContent = problems.join(' ');
+    renderFiles();
+    pumpUploads();
+  }
+
+  function removeAttachment(entry) {
+    entry.removed = true;
+    attachments = attachments.filter(function (other) { return other !== entry; });
+    // A running upload notices the mark and discards itself.
+    if (entry.state !== 'uploading' && entry.id) discardUpload(entry.id);
+    ui.fileNote.textContent = '';
+    saveAttachments();
+    renderFiles();
+  }
+
+  function discardUpload(id) {
+    sendPiece('id=' + encodeURIComponent(id) + '&remove=1').catch(function () { /* removed after a day anyway */ });
+  }
+
+  // One file after the other; "Apply change" waits until all of them are on the server.
+  async function pumpUploads() {
+    if (uploading) return;
+    uploading = true;
+    updateControls();
+    for (;;) {
+      const entry = attachments.find(function (item) { return item.state === 'queued'; });
+      if (!entry) break;
+      entry.state = 'uploading';
+      renderFiles();
+      try {
+        await uploadFile(entry);
+        entry.state = 'done';
+        entry.file = null;
+      } catch (err) {
+        entry.state = 'error';
+        entry.error = err.message || t('uploadFailed');
+      }
+      if (entry.removed && entry.id) discardUpload(entry.id);
+      saveAttachments();
+      renderFiles();
+    }
+    uploading = false;
+    updateControls();
+  }
+
+  // A file travels in pieces, so no request exceeds the server's size limits. The first piece creates the upload.
+  async function uploadFile(entry) {
+    const step = uploadLimits.chunk_bytes || 524288;
+    let offset = 0;
+    let retries = 0;
+    for (;;) {
+      if (entry.removed) throw new Error(t('uploadFailed'));
+      const query = entry.id ? 'id=' + encodeURIComponent(entry.id) + '&offset=' + offset
+        : 'app_id=' + encodeURIComponent(APP_ID) + '&name=' + encodeURIComponent(entry.name) + '&size=' + entry.size;
+      let data;
+      try {
+        data = await sendPiece(query, entry.file.slice(offset, offset + step));
+      } catch (err) {
+        // The server already has this piece (its answer got lost): continue where the server stands.
+        if (err.status === 409 && typeof err.received === 'number' && err.received > offset) { offset = err.received; continue; }
+        // No answer at all: the same piece once more.
+        if (!err.status && entry.id && retries++ < 2) continue;
+        throw err;
+      }
+      retries = 0;
+      entry.id = data.id;
+      entry.name = data.name;
+      if (data.complete) return;
+      if (!(data.received > offset)) throw new Error(t('uploadFailed'));
+      offset = data.received;
+      entry.sent = offset;
+      if (entry.info) entry.info.textContent = fileInfo(entry);
+    }
+  }
+
+  async function sendPiece(query, piece) {
+    const controller = new AbortController();
+    const timer = setTimeout(function () { controller.abort(); }, 120000);
+    try {
+      const options = { method: 'POST', cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/octet-stream' } };
+      if (piece) options.body = piece;
+      const res = await fetch(API + '/upload.php?' + query, options);
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        const err = new Error(data.message || t('uploadFailed'));
+        err.status = res.status;
+        err.received = data.received;
+        throw err;
+      }
+      return data;
+    } finally { clearTimeout(timer); }
+  }
+
   /* ── Requests and jobs ───────────────────────────────── */
 
   async function request(path, body) {
@@ -1261,6 +1521,7 @@
         const err = new Error(data.message || t('requestFailed'));
         err.status = res.status;
         err.jobId = data.job_id;
+        err.missing = data.missing;
         throw err;
       }
       return data;
@@ -1278,8 +1539,11 @@
     return 'app_id=' + encodeURIComponent(APP_ID) + '&workspace=' + encodeURIComponent(WORKSPACE);
   }
 
-  async function submitChange(transcript) {
-    await queueAction('submit', withContext({ transcript: transcript }));
+  // `files` are finished uploads ({ id }): the composer's list, or those of a request the agent answered with questions.
+  async function submitChange(transcript, files) {
+    const body = { transcript: transcript };
+    if (files && files.length) body.attachments = files.map(function (entry) { return entry.id; });
+    await queueAction('submit', withContext(body));
   }
 
   async function queueAction(endpoint, body) {
@@ -1291,11 +1555,13 @@
       const data = await request('/' + endpoint + '.php', body);
       if (endpoint === 'submit') {
         if (ui.input.value.trim() === body.transcript) setDraft('');
+        forgetAttachments(body.attachments);
         showResult(null);
       }
       trackJob(data.job_id, endpoint === 'submit' ? 'change' : endpoint);
     } catch (err) {
       if (err.jobId) { trackJob(err.jobId); return; }
+      forgetAttachments(err.missing);
       setStatus(t('inputKept', { message: err.message }), 'error', false);
       // A lost response may still have enqueued the job. Resolve that before allowing another send.
       if (!err.status || err.status >= 500) { resumeJob(); return; }
@@ -1417,7 +1683,10 @@
         }
       } else {
         // A rejected change request goes back into the text field, so nothing typed is lost.
-        if ((status.action || 'change') === 'change' && typeof status.prompt === 'string' && !ui.input.value.trim()) setDraft(status.prompt);
+        if ((status.action || 'change') === 'change' && typeof status.prompt === 'string' && !ui.input.value.trim()) {
+          setDraft(status.prompt);
+          if (!attachments.length) restoreAttachments(status.attachments);
+        }
         setStatus(failureText(status), 'error', false);
         toast(t(status.status === 'cancelled' ? 'cancelled' : 'notApplied'), 'error');
       }
@@ -1595,6 +1864,8 @@
     card.appendChild(head);
 
     if (status.prompt) card.appendChild(mk('div', 'rs-result-prompt', quoted(status.prompt)));
+    const attached = (status.attachments || []).map(function (entry) { return entry.name; });
+    if (attached.length) card.appendChild(mk('div', 'rs-result-meta', t('attachedFiles', { files: attached.join(', ') })));
     if (result.summary) card.appendChild(richText(result.summary, 'rs-result-summary'));
     if ((result.points || []).length) card.appendChild(pointList(result.points));
     const files = (status.files_changed || []).length;
@@ -1606,7 +1877,8 @@
         const prompt = status.prompt || '';
         const text = (changed ? t('followUpChanged', { prompt: prompt.slice(0, 400) }) : prompt) +
           '\n\n' + t('myAnswers') + '\n' + answersText(answers);
-        submitChange(text.slice(0, 9000));
+        // Nothing was changed yet: the files of the request go along again. After a change they are in the project.
+        submitChange(text.slice(0, 9000), changed ? [] : status.attachments);
       }, t(changed ? 'sendAnswersContinue' : 'sendAnswersApply'));
       answerButtons[answerButtons.length - 1].sayandshapeOwner = 'result';
       card.appendChild(form);

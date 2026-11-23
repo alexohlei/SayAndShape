@@ -37,6 +37,7 @@ async function runWidgetTests(source) {
     }
     let jobStatus = null;
     let chatMessages = [];
+    const uploads = new Map();
     const window = { SpeechRecognition: Speech, location: { reload() { reloads++; } } };
     const localStorage = { getItem: key => storage.get(key) || null, setItem: (key, val) => storage.set(key, val), removeItem: key => storage.delete(key) };
     const workspacesData = { success: true, public: 'main', workspaces: [
@@ -47,7 +48,7 @@ async function runWidgetTests(source) {
         last_change: { author: 'Maria', date: '2026-09-17T11:00:00Z', message: 'Snow' } }
     ] };
     const fetch = async (url, options = {}) => {
-      const body = options.body ? JSON.parse(options.body) : null;
+      const body = typeof options.body === 'string' ? JSON.parse(options.body) : null;
       calls.push({ url, body });
       let data;
       let status = 200;
@@ -60,6 +61,19 @@ async function runWidgetTests(source) {
         else if (url.includes('/history.php')) data = { success: true, commits: [{ hash: 'abc1234', message: 'Old prompt', date: '2026-09-17T10:00:00Z', can_rollback: true, is_latest: true }] };
         else if (url.includes('/workspaces.php')) data = workspacesData;
         else if (url.includes('/status.php')) data = { success: true, status: jobStatus };
+        else if (url.includes('/upload.php')) {
+          // Like api/upload.php: limits on GET; a POST carries one piece (here: an object with a size).
+          const query = new URLSearchParams(url.split('?')[1]);
+          if (options.method !== 'POST') data = { success: true, max_files: 2, max_bytes: 2097152, types: ['jpg', 'png', 'pdf'], chunk_bytes: 4 };
+          else if (query.get('remove')) { uploads.delete(query.get('id')); data = { success: true }; }
+          else {
+            const id = query.get('id') || 'u_test_' + (uploads.size + 1);
+            if (!uploads.has(id)) uploads.set(id, { id, name: query.get('name').replace(/ /g, '-'), size: Number(query.get('size')), received: 0 });
+            const entry = uploads.get(id);
+            entry.received += options.body.size;
+            data = Object.assign({ success: true, complete: entry.received === entry.size }, entry);
+          }
+        }
         else if (url.includes('/cancel.php')) data = { success: true, status: jobStatus };
         else if (url.includes('/discuss.php') && !body) data = { success: true, messages: chatMessages };
         else if (url.includes('/discuss.php') && body.clear) { chatMessages = []; data = { success: true, messages: [] }; }
@@ -85,7 +99,7 @@ async function runWidgetTests(source) {
       window, document, location, localStorage, fetch, setTimer, clearTimer, FakeURL, FakeAbortController, () => true, () => 'Winter Look');
     const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
     await flush();
-    return { nodes, calls, storage, recognitions, timers, flush, navigations, body: document.body,
+    return { nodes, calls, storage, recognitions, timers, flush, navigations, uploads, body: document.body,
       setStatus: value => { jobStatus = value; },
       setChat: value => { chatMessages = value; },
       async tick(delay) {
@@ -492,6 +506,87 @@ async function runWidgetTests(source) {
     send.click(); await app.flush();
     const sent = app.calls.filter(c => c.url.includes('/submit.php'))[1].body.transcript;
     assert(sent === 'Mach es schöner\n\nMeine Antworten auf deine Rückfragen:\n- Welcher Stil? → Ruhig', 'Follow-up not German: ' + sent);
+  });
+  const file = (name, size) => ({ name, size, slice: (from, to) => ({ size: Math.min(to, size) - from }) });
+  const dropped = files => ({ preventDefault() {}, dataTransfer: { types: ['Files'], files } });
+  const uploadCalls = app => app.calls.filter(c => c.url.includes('&name=') || c.url.includes('/upload.php?id='));
+  const fileRows = app => app.nodes.get('sayandshape-file-list').children;
+
+  await test('dropped and chosen files upload in pieces, are listed and travel with the request', async () => {
+    const app = await mount();
+    const get = id => app.nodes.get('sayandshape-' + id);
+    assert(get('files').hidden === false && get('drop').disabled === false, 'Drop area not offered');
+    assert(get('drop').children[1].children[1].textContent === 'Up to 2 files, 2 MB each', 'Limits not shown');
+    assert(get('file-input').accept === '.jpg,.png,.pdf' && get('file-input').multiple === true, 'File dialog not limited to the allowed types');
+    const view = get('view-change');
+    view.handlers.dragenter(dropped([]));
+    assert(get('drop').className.includes('rs-drop-active'), 'Drop area not highlighted while dragging');
+    view.handlers.drop(dropped([file('My photo.jpg', 10), file('tool.exe', 5), file('empty.png', 0)]));
+    assert(!get('drop').className.includes('rs-drop-active'), 'Highlight stays after the drop');
+    assert(get('send-btn').disabled, 'Sending possible while a file is uploading');
+    await app.flush(); await app.flush();
+    const pieces = uploadCalls(app).map(c => c.url.split('?')[1]);
+    assert(pieces.join(' ') === 'app_id=demo&name=My%20photo.jpg&size=10 id=u_test_1&offset=4 id=u_test_1&offset=8', 'Pieces wrong: ' + pieces.join(' '));
+    assert(fileRows(app).length === 1 && fileRows(app)[0].children[1].textContent === 'My-photo.jpg', 'Stored name not listed');
+    assert(fileRows(app)[0].children[2].textContent === '1 KB', 'Size not shown after the upload');
+    const note = get('file-note').textContent;
+    assert(note.includes('tool.exe') && note.includes('empty.png'), 'Rejected files not named: ' + note);
+    assert(!get('send-btn').disabled, 'Sending stays locked after the upload');
+    get('file-input').files = [file('plan.pdf', 3), file('third.png', 3)];
+    get('file-input').handlers.change(); await app.flush();
+    assert(fileRows(app).length === 2 && get('drop').disabled, 'Limit of two files not enforced');
+    assert(get('file-note').textContent === 'At most 2 files per request.', 'Limit not explained: ' + get('file-note').textContent);
+    assert(JSON.parse(app.storage.get(key + 'files')).map(f => f.id).join() === 'u_test_1,u_test_2', 'Uploads not remembered');
+    get('text-input').value = 'Use the photo as header'; get('send-btn').click(); await app.flush();
+    const sent = app.calls.find(c => c.url.includes('/submit.php')).body;
+    assert(sent.attachments.join() === 'u_test_1,u_test_2' && sent.transcript === 'Use the photo as header', 'Files not sent with the request');
+    assert(fileRows(app).length === 0 && !app.storage.get(key + 'files') && app.uploads.size === 2, 'List not cleared after sending, or uploads discarded');
+  });
+  await test('attached files survive a reload, can be removed, and block sending after a failed upload', async () => {
+    const saved = new Map([[key + 'files', JSON.stringify([{ id: 'u_old_1', name: 'logo.png', size: 2048 }])]]);
+    let fail = true;
+    const app = await mount(saved, (url, body) => url.includes('&name=') && fail ? { status: 413, data: { success: false, message: 'The file is too large (max. 1 MB)' } }
+      : url.includes('/submit.php') && body.attachments.includes('u_gone') ? { status: 410, data: { success: false, message: 'Gone', missing: ['u_gone'] } } : null);
+    const get = id => app.nodes.get('sayandshape-' + id);
+    assert(fileRows(app).length === 1 && fileRows(app)[0].children[1].textContent === 'logo.png', 'Files lost on reload');
+    get('view-change').handlers.drop(dropped([file('big.jpg', 9)])); await app.flush();
+    assert(fileRows(app)[1].className.includes('rs-file-error') && fileRows(app)[1].children[2].textContent.includes('too large'), 'Failed upload not marked');
+    get('text-input').value = 'Add the logo'; get('send-btn').click(); await app.flush();
+    assert(!app.calls.some(c => c.url.includes('/submit.php')), 'Request sent although a file failed');
+    fileRows(app)[1].children[3].click();
+    fileRows(app)[0].children[3].click(); await app.flush();
+    assert(app.calls.some(c => c.url.includes('id=u_old_1&remove=1')), 'Removed upload not discarded on the server');
+    assert(fileRows(app).length === 0 && !app.storage.get(key + 'files') && get('file-list').hidden, 'Removed file still listed');
+    // An upload the server no longer has is taken off the list; the text stays.
+    app.storage.set(key + 'files', JSON.stringify([{ id: 'u_gone', name: 'old.png', size: 1 }]));
+    const again = await mount(app.storage, (url, body) => url.includes('/submit.php') && body.attachments ? { status: 410, data: { success: false, message: 'Gone', missing: ['u_gone'] } } : null);
+    again.nodes.get('sayandshape-text-input').value = 'Add the logo'; again.nodes.get('sayandshape-send-btn').click(); await again.flush();
+    assert(fileRows(again).length === 0 && again.nodes.get('sayandshape-text-input').value === 'Add the logo', 'Missing upload not dropped');
+    assert(again.nodes.get('sayandshape-status').textContent.includes('Gone'), 'Reason not shown');
+  });
+  await test('files of a request come back with a rejection and go along with answers to questions', async () => {
+    const app = await mount();
+    const get = id => app.nodes.get('sayandshape-' + id);
+    const attachments = [{ id: 'u_a', name: 'team.jpg', size: 4096 }];
+    get('text-input').value = 'Add the team photo'; get('send-btn').click(); await app.flush();
+    app.setStatus({ job_id: 'j_test_1', status: 'done', action: 'change', commit_hash: null, prompt: 'Add the team photo', attachments,
+      result: { summary: 'Where should it go?', points: [], questions: [{ id: 'q1', text: 'Which page?', type: 'text', options: [] }] } });
+    await app.tick(2000);
+    const card = get('result');
+    assert(byClass(card, 'rs-result-meta').some(node => node.textContent === 'Files: team.jpg'), 'Files not named on the result card');
+    const free = byClass(card, 'rs-question-free')[0];
+    free.value = 'About us'; free.handlers.input();
+    byClass(card, 'rs-questions')[0].children[1].children[0].click(); await app.flush();
+    assert(app.calls.filter(c => c.url.includes('/submit.php'))[1].body.attachments.join() === 'u_a', 'Files not sent again with the answers');
+    app.setStatus({ job_id: 'j_test_1', status: 'blocked', action: 'change', blocked_reason: 'No', prompt: 'Add the team photo', attachments });
+    await app.tick(2000);
+    assert(get('text-input').value === 'Add the team photo' && fileRows(app).length === 1, 'Rejected request did not return its files');
+  });
+  await test('no drop area when the project does not take uploads', async () => {
+    const app = await mount(null, url => url.includes('/upload.php') ? { data: { success: true, max_files: 0, max_bytes: 1, types: ['jpg'], chunk_bytes: 4 } } : null);
+    assert(app.nodes.get('sayandshape-files').hidden === true, 'Drop area shown although uploads are off');
+    app.nodes.get('sayandshape-view-change').handlers.drop(dropped([file('a.jpg', 3)])); await app.flush();
+    assert(!app.calls.some(c => c.url.includes('&name=')), 'Upload started although uploads are off');
   });
   await test('missing or unknown language keeps the panel in English', async () => {
     for (const language of [undefined, 'fr', '', null, 'toString']) {

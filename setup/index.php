@@ -206,6 +206,16 @@ header('X-Frame-Options: SAMEORIGIN');
         <div class="field"><label for="f-public"><?= $t('Public variant') ?></label><input id="f-public" type="text" value="main" maxlength="40"></div>
         <div class="field"><label for="f-maxfiles"><?= $t('Files per change') ?></label><input id="f-maxfiles" type="number" min="1" max="200" value="20" style="width:100px"></div>
         <div class="field">
+          <label for="f-uploadfiles"><?= $t('Uploads per request') ?> <span><?= $t('0 switches uploads off') ?></span></label>
+          <input id="f-uploadfiles" type="number" min="0" max="50" value="10" style="width:100px">
+        </div>
+        <div class="field"><label for="f-uploadmb"><?= $t('Largest upload (MB)') ?></label><input id="f-uploadmb" type="number" min="1" max="200" value="25" style="width:100px"></div>
+        <div class="field" style="grid-column:1 / -1">
+          <label for="f-uploadtypes"><?= $t('Upload file types') ?> <span><?= $t('file endings, separated by commas') ?></span></label>
+          <input id="f-uploadtypes" type="text" maxlength="2000" spellcheck="false" autocomplete="off">
+          <span class="hint"><?= $t('Empty restores the standard list. Server code such as php is never accepted.') ?></span>
+        </div>
+        <div class="field">
           <label><?= $t('Blocked terms') ?> <span><?= $t('regex, applied before the AI check') ?></span></label>
           <div class="chips" id="chips-patterns"><input id="in-patterns" type="text" placeholder="<?= $t('Term, press Enter') ?>"></div>
         </div>
@@ -241,7 +251,7 @@ header('X-Frame-Options: SAMEORIGIN');
   const t = (text, vars) => (TEXTS[text] || text).replace(/\{(\w+)\}/g, (all, name) => vars && name in vars ? String(vars[name]) : all);
   const $ = id => document.getElementById(id);
   const chips = { blocked: [], shared: [], patterns: [] };
-  let apps = [], editing = null, globalParallel = 1;
+  let apps = [], editing = null, globalParallel = 1, uploadTypes = [];
 
   async function call(endpoint, body) {
     const options = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
@@ -309,6 +319,9 @@ header('X-Frame-Options: SAMEORIGIN');
     $('f-url').value = app ? (app.app_url || '') : '';
     $('f-public').value = app ? (app.public_workspace || 'main') : 'main';
     $('f-maxfiles').value = app ? (app.max_files_per_change || 20) : 20;
+    $('f-uploadfiles').value = app && Number.isInteger(app.max_upload_files) ? app.max_upload_files : 10;
+    $('f-uploadmb').value = app ? (app.max_upload_mb || 25) : 25;
+    $('f-uploadtypes').value = ((app && app.upload_types) || uploadTypes).join(', ');
     $('f-auto').checked = app ? app.auto_commit_host_changes !== false : true;
     $('f-parallel').value = globalParallel;
     chips.blocked = app ? (app.extra_blocked_files || []).slice() : ['.env', 'config.php'];
@@ -359,13 +372,16 @@ header('X-Frame-Options: SAMEORIGIN');
   async function load() {
     try {
       const data = await call('apps.php');
-      apps = data.apps; globalParallel = data.max_parallel_jobs;
+      apps = data.apps; globalParallel = data.max_parallel_jobs; uploadTypes = data.upload_types_default || [];
       $('daemon').textContent = data.daemon_running ? t('Service running') : t('Service not running');
       $('daemon').className = 'pill ' + (data.daemon_running ? 'pill-ok' : 'pill-bad');
       $('writable').classList.toggle('hidden', data.config_writable);
       $('save').disabled = !data.config_writable;
       renderProjects();
-      if (editing === null) $('f-parallel').value = globalParallel;
+      if (editing === null) {
+        $('f-parallel').value = globalParallel;
+        if (!$('f-uploadtypes').value) $('f-uploadtypes').value = uploadTypes.join(', ');
+      }
     } catch (err) { message(err.message, false); }
   }
 
@@ -402,6 +418,9 @@ header('X-Frame-Options: SAMEORIGIN');
       app_url: $('f-url').value.trim(),
       public_workspace: $('f-public').value.trim() || 'main',
       max_files_per_change: parseInt($('f-maxfiles').value, 10) || 20,
+      max_upload_files: Number.isInteger(parseInt($('f-uploadfiles').value, 10)) ? parseInt($('f-uploadfiles').value, 10) : 10,
+      max_upload_mb: parseInt($('f-uploadmb').value, 10) || 25,
+      upload_types: $('f-uploadtypes').value.split(/[\s,;]+/).filter(Boolean),
       max_parallel_jobs: parseInt($('f-parallel').value, 10) || 1,
       auto_commit_host_changes: $('f-auto').checked,
       extra_blocked_files: chips.blocked, shared_dirs: chips.shared, extra_blocked_patterns: chips.patterns
