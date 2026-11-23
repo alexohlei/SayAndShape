@@ -66,7 +66,12 @@ function sayandshapeSessionStore(bool $engine): void {
     }
 }
 
-/** Opens an existing session by cookie. Never creates one, so anonymous visitors get no session cookie. */
+/**
+ * Opens an existing session by cookie. Never creates one, so anonymous visitors get no session cookie.
+ * It also never sends a cookie: PHP would otherwise set the cookie of a session opened by its ID again on every
+ * request, with default attributes. That replaced the login's cookie (14 days, HttpOnly, SameSite) by one that
+ * scripts can read and that ends with the browser session, and it did the same to the app's own session cookie.
+ */
 function sayandshapeOpenSession(string $name, bool $engine): bool {
     if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
     $id = $_COOKIE[$name] ?? null;
@@ -74,7 +79,7 @@ function sayandshapeOpenSession(string $name, bool $engine): bool {
     sayandshapeSessionStore($engine);
     session_name($name);
     session_id($id);
-    return @session_start();
+    return @session_start(['use_cookies' => 0]);
 }
 
 /** Who is logged in: ['user' => int, 'app' => ?string]. `app` is the only project this login may touch (null: all). */
@@ -180,7 +185,7 @@ function sayandshapeLogin(string $password): string {
     session_name(sayandshapeEngineSessionName());
     session_set_cookie_params(['lifetime' => $life, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax', 'secure' => sayandshapeIsHttps()]);
     session_id(session_create_id());
-    if (!@session_start()) return sayandshapeT('Login could not be saved (write permission on jobs/?)');
+    if (!@session_start(['use_cookies' => 1])) return sayandshapeT('Login could not be saved (write permission on jobs/?)');
     $_SESSION['sayandshape_admin'] = sayandshapeAdminScope();
     session_write_close();
     // Not a secret: it only tells the router that showing the panel is worthwhile. The API does the real check.

@@ -266,6 +266,74 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.get(url + '/media/clip.bin', headers={'If-None-Match': etag})[0], 304)
         self.assertEqual(self.cli('check', 'site', '--url', url).returncode, 0)
 
+    def test_page_seen_as_a_visitor_gets_the_panel_after_login(self):
+        # A browser that kept the page from before the login must not be told "unchanged" (button missing on
+        # some pages), and must not reuse it without asking: pages are revalidated and differ with the panel.
+        self.cli('add', str(self.site), '--server', 'php')
+        url = self.serve(self.site)
+        for path in ('/', '/docs/'):
+            status, body, visitor = self.get(url + path)
+            self.assertEqual((status, visitor['Cache-Control'], visitor['Vary']), (200, 'no-cache', 'Cookie'), path)
+            self.assertNotIn(b'sayandshape-widget.js', body)
+            self.assertEqual(self.get(url + path, headers={'If-None-Match': visitor['ETag']})[0], 304)
+            login = {'Cookie': 'sayandshape_ui=1', 'If-None-Match': visitor['ETag']}
+            status, body, editor = self.get(url + path, headers=login)
+            self.assertEqual(status, 200, path)
+            self.assertIn(b'sayandshape-widget.js', body)
+            self.assertNotEqual(editor['ETag'], visitor['ETag'])
+            # … and after logging out the page with the panel is not reused either.
+            status, body, _ = self.get(url + path, headers={'If-None-Match': editor['ETag']})
+            self.assertEqual(status, 200, path)
+            self.assertNotIn(b'sayandshape-widget.js', body)
+
+    def test_cache_version_reaches_pages_of_the_variant(self):
+        self.cli('add', str(self.site), '--server', 'php')
+        url = self.serve(self.site)
+        page = ('<html><head><link rel="stylesheet" href="css/site.css"><link rel="canonical" href="https://example.org/">'
+                '<script src="/js/app.js?x=1"></script><script type="module" src="js/mod.js"></script></head>'
+                '<body><img src="media/clip.png"><a href="css/site.css">css</a></body></html>')
+        busted = page.replace('css/site.css">', 'css/site.css?v=3">', 1).replace('app.js?x=1', 'app.js?x=1&amp;v=3') \
+                     .replace('media/clip.png', 'media/clip.png?v=3')
+        (self.site / 'index.html').write_text(page)
+        (self.site / 'page.php').write_text('<?php ?><html><body><img src="a.png"></body></html>')
+        (self.site / 'data.php').write_text('<?php header("Content-Type: application/json"); echo json_encode(["html" => "<img src=\\"a.png\\">"]);')
+        html = {'Accept': 'text/html,application/xhtml+xml'}
+        # Before the first change the project folder itself is served: no version, pages stay byte for byte.
+        status, body, headers = self.get(url + '/')
+        self.assertEqual((status, body.decode(), headers['Cache-Control']), (200, page, 'no-cache'))
+        self.assertEqual(self.get(url + '/page.php', headers=html)[1], b'<html><body><img src="a.png"></body></html>')
+
+        main = self.variant('site', 'main', {})
+        self.assertEqual(self.get(url + '/')[1].decode(), page)                 # a variant without a published change
+        (main / '.git/sayandshape-cache-version').write_text('3')
+        status, body, headers = self.get(url + '/')
+        self.assertEqual((status, body.decode(), headers['Cache-Control']), (200, busted, 'no-cache'))
+        self.assertEqual(self.get(url + '/w/main/index.html')[1].decode(), busted)
+        # The page is revalidated, and a new version is a new page.
+        self.assertEqual(self.get(url + '/', headers={'If-None-Match': headers['ETag']})[0], 304)
+        (main / '.git/sayandshape-cache-version').write_text('4')
+        status, body, _ = self.get(url + '/', headers={'If-None-Match': headers['ETag']})
+        self.assertEqual((status, body.decode()), (200, busted.replace('v=3', 'v=4')))
+        # Logged-in browsers get the version and the panel.
+        body = self.get(url + '/', headers={'Cookie': 'sayandshape_ui=1'})[1].decode()
+        self.assertIn('css/site.css?v=4', body)
+        self.assertIn('sayandshape-widget.js" data-app="site"', body)
+        # Files are served under the versioned address and are revalidated instead of being kept blindly.
+        status, body, headers = self.get(url + '/css/site.css?v=4')
+        self.assertEqual((status, body, headers['Cache-Control']), (200, b'body { color: black; }', 'no-cache'))
+        self.assertEqual(self.get(url + '/css/site.css?v=4', headers={'If-None-Match': headers['ETag']})[0], 304)
+        self.assertEqual(self.get(url + '/media/clip.bin?v=4')[2]['Cache-Control'], 'no-cache')
+        # PHP pages: page views get the version, also for visitors; other answers stay untouched.
+        self.assertEqual(self.get(url + '/page.php', headers=html)[1], b'<html><body><img src="a.png?v=4"></body></html>')
+        self.assertEqual(self.get(url + '/page.php')[1], b'<html><body><img src="a.png"></body></html>')
+        self.assertEqual(json.loads(self.get(url + '/data.php', headers=html)[1]), {'html': '<img src="a.png">'})
+        body = self.get(url + '/page.php', headers={'Cookie': 'sayandshape_ui=1'})[1]
+        self.assertIn(b'<img src="a.png?v=4">', body)
+        self.assertIn(b'sayandshape-widget.js', body)
+        # Another variant counts on its own.
+        self.variant('site', 'winter', {})
+        self.assertEqual(self.get(url + '/w/winter/')[1].decode(), page)
+
     def test_prefix_mode_keeps_the_app_at_its_address(self):
         self.cli('add', str(self.site), '--server', 'php', '--serve', 'prefix')
         url = self.serve(self.site)
@@ -299,6 +367,14 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.get(url + '/sayandshape/login/', client, cross, b'password=correct+horse')[0], 403)
         status, _, headers = self.get(url + '/sayandshape/login/', client, form, b'password=correct+horse')
         self.assertEqual((status, headers['Location']), (303, '/'))
+        cookies = {line.split('=')[0]: line.lower() for line in headers.get_all('Set-Cookie')}
+        name = next(key for key in cookies if key.startswith('SAYANDSHAPE_'))
+        self.assertTrue(all(part in cookies[name] for part in ('max-age=1209600', 'httponly', 'samesite=lax')), cookies[name])
+        self.assertIn('max-age=1209600', cookies['sayandshape_ui'])
+        # Later requests only read the session. They must not set its cookie again: that replaced the login's
+        # cookie by one without lifetime and HttpOnly, so the login (and the button) was gone after a browser restart.
+        for path in ('/sayandshape/api/session.php', '/sayandshape/api/workspaces.php?app_id=site', '/sayandshape/login/', '/'):
+            self.assertIsNone(self.get(url + path, client)[2].get('Set-Cookie'), path)
         session = json.loads(self.get(url + '/sayandshape/api/session.php', client)[1])
         self.assertEqual((session['logged_in'], session['user_id'], session['engine_admin']), (True, 1, True))
         self.assertIn(b'sayandshape-widget.js', self.get(url + '/', client)[1])
@@ -332,8 +408,10 @@ class InstallTests(unittest.TestCase):
         self.assertIn(b'data-app="shop"', self.get(url + '/', client)[1])
         self.assertFalse(json.loads(self.get(url + '/sayandshape/api/session.php', client)[1])['logged_in'])
         self.assertEqual(self.get(url + '/admin.php', client)[1], b'ok')
-        session = json.loads(self.get(url + '/sayandshape/api/session.php', client)[1])
+        status, body, headers = self.get(url + '/sayandshape/api/session.php', client)
+        session = json.loads(body)
         self.assertEqual((session['logged_in'], session['user_id'], session['engine_admin']), (True, 7, False))
+        self.assertIsNone(headers.get('Set-Cookie'))        # the app's session cookie stays the app's business
         self.assertEqual(self.get(url + '/sayandshape/api/workspaces.php?app_id=shop', client)[0], 200)
         self.assertEqual(self.get(url + '/sayandshape/api/workspaces.php?app_id=site', client)[0], 403)
         self.assertEqual(self.get(url + '/sayandshape/api/apps.php', client)[0], 403)
@@ -429,6 +507,26 @@ class InstallTests(unittest.TestCase):
         (self.agents / 'codex.logged-out').touch()
         self.assertIn('Warning: codex is not signed in', self.cli('agent').stdout)
         self.assertIn('[WARN] AI agent "codex"', self.cli('doctor', ok=False).stdout)
+
+    def test_agent_sandbox_is_on_until_switched_off_on_the_command_line(self):
+        self.assertIs(self.config()['agent']['sandbox'], True)
+        self.assertIn('sandbox on', self.cli('agent').stdout)
+        self.assertIn('Agent sandbox', self.cli('doctor', ok=False).stdout)
+        self.assertNotIn('Agent sandbox is off', self.cli('doctor', ok=False).stdout)
+        out = self.cli('agent', '--sandbox', 'off').stdout
+        self.assertIn('sandbox OFF', out)
+        self.assertIn('only inside a container or VM', out)
+        self.assertIs(self.config()['agent']['sandbox'], False)
+        self.assertIn('[WARN] Agent sandbox is off', self.cli('doctor', ok=False).stdout)
+        # Choosing another agent keeps the switch; a configuration from before the switch existed counts as on.
+        self.cli('agent', '--engine', 'codex')
+        self.assertEqual((self.config()['agent']['engine'], self.config()['agent']['sandbox']), ('codex', False))
+        self.cli('agent', '--sandbox', 'on')
+        self.assertIs(self.config()['agent']['sandbox'], True)
+        config = self.config()
+        del config['agent']['sandbox']
+        (self.engine / 'config/apps.json').write_text(json.dumps(config))
+        self.assertIn('sandbox on', self.cli('agent').stdout)
 
     def test_agent_question_in_a_terminal(self):
         key = 'sk-ant-test-0123456789abcdef'
