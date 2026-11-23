@@ -159,7 +159,9 @@ the reason it was refused. "Apply change" waits for running uploads.
 - The worker names the files to the guardrail, then copies them into `.sayandshape-uploads/` of
   the job's working copy and appends their paths to the editing prompt: the agent copies what
   belongs on the site to a fitting place (also into a folder listed in `shared_dirs`, which a
-  variant may hold on top of the app's) and only reads what serves as a template. The folder is
+  variant may hold on top of the app's) and only reads what serves as a template. Shared folders
+  that Git ignores are named to the agent as off limits, because a file placed there would never
+  be committed or published. The folder is
   removed before the diff review and ignored by Git in the working copy, so only files the agent
   placed are reviewed, committed and published; they count towards `max_files_per_change`.
 - Uploads stay for a day after they were last sent with a request: when the agent only asks

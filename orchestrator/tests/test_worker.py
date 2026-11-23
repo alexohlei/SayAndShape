@@ -1023,6 +1023,21 @@ class EngineTests(unittest.TestCase):
         self.assertNotIn('attached these files', run.call_args_list[0].kwargs['stdin_text'])
         self.assertEqual(self.status()['status'], 'done')
 
+    def test_shared_folders_git_ignores_are_off_limits_for_uploads(self):
+        (self.clone / '.git/info').mkdir(exist_ok=True)
+        (self.clone / '.git/info/exclude').write_text('/docs/\nsecret.php\n')
+        shared = ['images', 'docs/', 'secret.php', 'pages/form.php']
+        ignored = worker.git_ignored(self.clone, shared)
+        self.assertEqual(ignored, ['docs', 'secret.php'])
+        self.assertEqual(worker.git_ignored(self.clone, []), [])
+        note = worker.upload_note([('.sayandshape-uploads/a.pdf', 2048)], shared, ignored)
+        self.assertIn('served from the live site: images, pages/form.php. You may create', note)
+        self.assertIn('Git ignores these paths, so never place an uploaded file there: docs, secret.php.', note)
+        # Nothing ignored: no list of forbidden paths, only the general rule.
+        plain = worker.upload_note([('.sayandshape-uploads/a.pdf', 2048)], ['images'])
+        self.assertNotIn('Git ignores these paths', plain)
+        self.assertIn('at a path that .gitignore excludes', plain)
+
     def test_missing_foreign_or_disallowed_uploads_stop_the_job(self):
         def outcome(**fields):
             job, path = self.job(**fields)
