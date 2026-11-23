@@ -137,26 +137,30 @@ Two requests: *"Rename the café to “Harbour Lane Coffee” and change the sma
 <p><b>Result card.</b> The agent says what it changed in plain words and asks when something is open. Answers are one click; an unclear request changes nothing and only asks.</p>
 </td>
 <td width="50%" valign="top">
-<img src="docs/screenshots/history.jpg" alt="The History tab with two changes by Sam; the newest can be undone, the older one is locked because the newer one edits the same files">
-<p><b>History.</b> One entry per change, with who asked for it. Undo a single change, discard everything since the baseline, or pin a new baseline. Undo is locked, with the reason, while a later change depends on it.</p>
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-<img src="docs/screenshots/variants.jpg" alt="The Variants tab with main and a variant called Green; the page behind it already has a forest-green accent color">
-<p><b>Variants.</b> "Switch the orange accent color to a deep forest green" ran in the variant <i>Green</i> at <code>/w/green/</code>; the live site stayed orange. Merge into “main” when it's good.</p>
-</td>
-<td width="50%" valign="top">
 <img src="docs/screenshots/discuss.jpg" alt="The Discuss tab answering which pages show the opening hours, with the hours listed">
 <p><b>Discuss.</b> Ask about the site without changing anything: <i>"Which pages show the opening hours, and what are they?"</i></p>
 </td>
 </tr>
 <tr>
-<td width="36%" valign="top">
-<img src="docs/screenshots/setup.jpg" alt="The settings on the setup page: language, AI agent engine, model and effort, and the registered project">
+<td width="50%" valign="top">
+<img src="docs/screenshots/history.jpg" alt="The History tab with two changes by Sam; the newest can be undone, the older one is locked because the newer one edits the same files">
+<p><b>History.</b> One entry per change, with who asked for it. Undo a single change, discard everything since the baseline, or pin a new baseline. Undo is locked, with the reason, while a later change depends on it.</p>
+</td>
+<td width="50%" valign="top">
+<img src="docs/screenshots/variants.jpg" alt="The Variants tab with the public variant main and a variant called Green that was forked from it">
+<p><b>Variants.</b> "Switch the orange accent color to a deep forest green" ran in the variant <i>Green</i> at <code>/w/green/</code>; the live site stayed orange. Merge into “main” when it's good.</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/screenshots/setup.jpg" alt="The settings on the setup page: language, AI agent engine, model and effort">
+</td>
+<td width="50%" valign="middle">
 <p><b>Settings.</b> Interface language, AI agent (Claude Code or Codex), model and effort, for all projects of the installation.</p>
 </td>
-<td width="64%" valign="top">
+</tr>
+<tr>
+<td colspan="2">
 <img src="docs/screenshots/language.jpg" alt="The History tab side by side in English and in German">
 <p><b>English or German.</b> One setting switches the panel, login, setup page and messages. The AI replies in the language of each request.</p>
 </td>
