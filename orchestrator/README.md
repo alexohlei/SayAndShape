@@ -32,8 +32,24 @@ It needs Git, Bash, jq, PHP and a signed-in AI agent (`claude` or `codex`).
   an interrupted publication is reset. Confirmed successful jobs are not reset. Prompts
   are not run again automatically after a restart.
 
-The working copy is not an operating-system sandbox. The existing Codex permission setting
-was left unchanged by these measures.
+The working copy alone is not a boundary. While it edits, the agent therefore runs in the
+sandbox of its CLI (`agent.sandbox`, on by default): Claude Code with `--permission-mode acceptEdits`,
+its Bash sandbox and `permissions.blockReadsOutsideWorkingDirectories`, Codex with
+`-s workspace-write`. It can change and delete files in the working copy and write its result file;
+writing elsewhere and network access are refused. `claude_settings()` and `Worker.ask_agent()` build
+the calls. With `agent.sandbox: false` (`bin/sayandshape agent --sandbox off`, meant for
+installations inside a container) the agent runs with `--dangerously-skip-permissions` or
+`--dangerously-bypass-approvals-and-sandbox`. See "The agent sandbox" in `AGENTS.md`.
+
+## Cache version
+
+`bump_cache_version()` counts the number in `<variant>/.git/sayandshape-cache-version` up each time
+the worker moves a variant to another state of its files: after publishing a change, an undo, a
+reset or a merge, and after withdrawing an interrupted publication (also during recovery). A job
+that publishes nothing (follow-up questions only, "Set new baseline") leaves it alone. The file is
+written atomically, is world-readable for the web server and never fails a job. The router appends
+the number to the addresses of a page's stylesheets, scripts and images; see "Cache buster" in
+`AGENTS.md`.
 
 ## Variants (workspaces)
 
@@ -205,15 +221,18 @@ node orchestrator/tests/test_widget.js   # without Node: call runWidgetTests(sou
 
 `test_install.py` tests the installation path with a temporary copy of the engine:
 `bin/sayandshape` (connecting and removing a project, detecting and selecting the AI agent
-including an API key with stub `claude` and `codex` programs, password, worker), the bundled
-router (public variant at the normal address or only under `/w/`, shared folders, dot-paths,
-PHP pages inside their variant, inserting the panel) and both login methods (SayAndShape's own
-login, the app's session and its restriction to its own project).
+including an API key with stub `claude` and `codex` programs, the sandbox switch, password,
+worker), the bundled router (public variant at the normal address or only under `/w/`, shared
+folders, dot-paths, PHP pages inside their variant, inserting the panel, the cache version in
+pages) and both login methods (SayAndShape's own login, the app's session and its restriction to
+its own project).
 
 `apps.php` and `inspect_dir.php` (setup page) are tested in `test_api.py` with
 temporary directories; `test_worker.py` covers fork, delete, rename,
 merge (including conflict and repetition), auto-commit and the parallel dispatcher.
 
-The worker tests simulate model execution and need no external API calls. The widget tests
+The worker tests simulate model execution and need no external API calls. They check the
+arguments the agent CLIs are started with (sandboxed by default, unlimited only with
+`agent.sandbox: false`), not the sandboxes of the CLIs themselves. The widget tests
 simulate the DOM, network and speech recognition; real microphones and browser permission
 dialogs are not covered.

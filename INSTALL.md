@@ -31,8 +31,13 @@ Find these out yourself where you can (look at the project, the web server confi
 running processes). Ask the user only for what you cannot determine.
 
 1. **Project folder**: the directory the web server serves for this site, e.g. `/var/www/blog`.
+   If you were asked to install SayAndShape "for the website in this folder", it is the directory
+   you were started in: the site is already published from there.
 2. **Address**: the URL under which that folder is reachable, including a sub-path if there is
-   one, e.g. `https://example.org` or `https://example.org/blog`.
+   one, e.g. `https://example.org` or `https://example.org/blog`. Look it up: the virtual host
+   whose `DocumentRoot` (Apache) or `root` (Nginx) is the project folder or a parent of it names
+   the host (`ServerName`, `server_name`), and a listener on port 443 means `https`. Ask the user
+   only if no configuration or several addresses fit.
 3. **Web server**: Apache, Nginx or `php -S`.
 4. **Login**: by default SayAndShape brings its own login page. Only if the project already has
    an admin area whose login should be reused, see [Using the project's own login](#using-the-projects-own-login).
@@ -43,6 +48,10 @@ running processes). Ask the user only for what you cannot determine.
 6. **Interface language**: the panel, login and setup page are English by default and can be
    switched to German. Use German when the user writes to you in German or asks for it; otherwise
    keep English.
+7. **Isolation**: look at what else lives on this machine. SayAndShape lets an AI agent change
+   files here, so the recommended place for it is a container or a small VM that holds only the
+   sites people may edit. If the machine also holds other sites, databases or credentials, tell
+   the user before you continue and point them to "Safety" in `README.md`; go on when they agree.
 
 Rules for this installation:
 
@@ -55,6 +64,9 @@ Rules for this installation:
 - Show the generated password to the user once. Do not write it into files or commit it.
 - An API key is only ever passed to `bin/sayandshape agent --api-key-stdin`. Do not put it into a
   command line, a file of your own or the project.
+- Leave the agent sandbox on. It is the default and keeps the AI agent's write access inside the
+  working copy of a change. Switch it off (`bin/sayandshape agent --sandbox off`) only when the
+  user asks for it and the installation runs inside a container or VM.
 
 ## Step 1: Get the engine
 
@@ -114,6 +126,8 @@ If something is missing:
 | Python older than 3.9 | install Python 3.9+ |
 | `jq` / `git` not found | install them (`apt install jq git`, `brew install jq git`) |
 | AI agent "claude" not in PATH | install it with the command `doctor` prints, or switch: `bin/sayandshape agent --engine codex` |
+| Agent sandbox: `bwrap` / `socat` not found (Linux, claude) | `sudo apt install bubblewrap socat` (or the distribution's equivalent); needs `sudo`, tell the user. Without them every change request fails |
+| Agent sandbox: Claude Code … does not block reads (`WARN`) | update Claude Code (`claude update`) to 2.1.257 or newer |
 | AI agent … not signed in (`WARN`) | sign in as the worker user (`claude auth login`, `codex login`), or store an API key: `bin/sayandshape agent --api-key-stdin` |
 
 The AI agent CLI must be installed, and signed in or given an API key, **for the
@@ -250,6 +264,10 @@ Tell the user, in their language:
 3. The first change takes a little longer: SayAndShape copies the site into its first variant.
 4. The original project folder is never modified. Removing SayAndShape again:
    `bin/sayandshape remove <id>`.
+5. Safety: everyone who has the password can give the AI agent instructions. The agent works in
+   a sandbox and can only write to a copy of the site, but the recommended setup remains a
+   container or VM that holds nothing else ("Safety" in `README.md`). Say plainly whether this
+   installation runs in one.
 
 Do not submit a real change request yourself to "test" it unless the user asks: each request
 runs the AI agent and costs budget.
@@ -286,7 +304,8 @@ with the project's PHP session instead of the SayAndShape login:
   variants stay in `clones/<id>/` unless you add `--purge`.
 - **Which AI runs the changes:** `bin/sayandshape agent` (agent, API key or the CLI's sign-in), or
   `/sayandshape/setup/` → "Settings" (agent, model, effort). The settings are `agent` in
-  `config/apps.json`; an API key can only be set on the command line.
+  `config/apps.json`; an API key and the agent sandbox (`--sandbox on|off`) can only be set on the
+  command line.
 - **Interface language:** `/sayandshape/setup/` → "Settings" → "Language", or
   `bin/sayandshape language en|de`. Stored as `language` in `config/apps.json`. The AI writes its
   summaries and answers in the language of each request, whatever this setting is.
@@ -312,6 +331,10 @@ browser ──► web server ──► <project>/sayandshape-router.php ──�
 - With `serve: root` every file of the project is delivered through PHP (with caching headers and
   byte ranges). That is fine for ordinary sites; for very busy ones put a cache in front or use
   `--serve prefix`, which leaves the live site to the web server.
+- Cache buster: every published change counts the variant's cache version up. Pages of the variant
+  get it appended to their own stylesheets, scripts and images (`css/site.css?v=12`), and files are
+  sent with `Cache-Control: no-cache`, so browsers ask again and get a short `304` while a file is
+  unchanged. Nothing has to be set up for this, and the site's files are not edited for it.
 - The engine folder carries an `.htaccess` that denies all direct web access (Apache). Nginx has
   no such safety net, so there the engine really must be outside the document root.
 

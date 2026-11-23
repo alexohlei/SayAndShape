@@ -96,7 +96,9 @@ Written by `bin/sayandshape add` and the setup page. Per project (`apps.<id>`):
 Top level: `max_parallel_jobs` (jobs at once across all projects, never more than one per variant),
 `language` (`en`, the default, or `de`: interface language of the panel, login, setup page, API and
 worker messages and the commit subjects the worker writes; `bin/sayandshape language` or the setup
-page) and `agent` (`engine`: `claude` or `codex`, models, `effort`).
+page) and `agent` (`engine`: `claude` or `codex`, models, `effort`, and `sandbox`: on unless it is
+`false`, see "The agent sandbox"; changed with `bin/sayandshape agent --sandbox on|off`, never
+through the setup page or the API).
 
 `bin/sayandshape init` detects which of the two CLIs are installed and signed in; in a terminal it asks
 which one to use and whether it signs in with the CLI's own login or an API key, otherwise it takes
@@ -117,7 +119,11 @@ read or write it.
   as admin; the user ID comes from `$_SESSION[user_key]` (default `user_id`, fallback 1). Such a
   login is confined to the project whose router the request came through; with
   `engine_admin: true` it counts as engine admin too. The engine login works in addition.
-- Sessions are only opened when the browser sent the cookie, so visitors never get one.
+- Sessions are only opened when the browser sent the cookie, so visitors never get one. Opening a
+  session never sets a cookie (`sayandshapeOpenSession()` starts it with `use_cookies` off): the
+  cookie the login set, SayAndShape's or the app's, keeps its lifetime and attributes.
+- Pages are sent with `Cache-Control: no-cache`, `Vary: Cookie` and an `ETag` that differs with and
+  without the panel, so a page a browser loaded before the login is fetched again after it.
 - The server side is the security boundary: every endpoint calls `sayandshapeRequireAdmin()` or
   `sayandshapeRequireEngineAdmin()` (`apps.php`, `agent.php`, `inspect_dir.php`, setup page), and
   `sayandshapeApp()` rejects other projects for a confined login. POST endpoints accept only
@@ -147,8 +153,8 @@ stay on this machine.
 
 The worker refuses to overwrite uncommitted changes in a published variant and checks its
 baseline again before publication. Temporary copies and recovery journals live under
-`~/.local/state/sayandshape/<engine-path-hash>/` for the daemon user. This working-copy
-isolation is not an operating-system sandbox.
+`~/.local/state/sayandshape/<engine-path-hash>/` for the daemon user. The working copy alone is
+not a boundary; the editing agent is confined to it by the agent sandbox (see below).
 
 Only one active job per variant is accepted (HTTP 409 includes the active job ID); different
 variants run in parallel up to `max_parallel_jobs`. Submission, rollback, reset, baseline, fork,
@@ -220,13 +226,44 @@ Every change passes through three checks before it is committed:
 2. **LLM guardrail** (in `orchestrator/worker.py`) — a read-only AI call that
    semantically judges whether the request stays within the app's editable surface.
    It is **fail-closed**: an empty/error verdict blocks the change.
+   Changing and deleting inside the site is allowed (content, sections, pages, images, files:
+   every change can be undone); anything that reaches beyond the site is not (other sites,
+   projects, files or programs on the server, its configuration, authentication, secrets).
    What users may change comes from the project's `allowed_changes` sentence; the fixed part of
    the prompt lives in `Worker.process_locked()` in `worker.py`. The AI engine, model and effort
    come from `agent` in `config/apps.json`.
 3. **Diff review** (`orchestrator/safety/diff_review.py`, also available through
    `diff-review.sh`) — checks changes against the fixed baseline, blocked paths,
-   dangerous patterns, symlinks, and `max_files_per_change`. Only a successful result
-   is committed and published; rejected workspaces are discarded.
+   dangerous patterns (code that runs programs on the server, such as `system`, `shell_exec`
+   or `popen`), symlinks, and `max_files_per_change`. Deleted files pass like changed ones.
+   Only a successful result is committed and published; rejected workspaces are discarded.
+
+### The agent sandbox
+
+The three stages judge the request and the result. The agent sandbox limits what the agent can do
+in between, while it edits. It is on by default (`agent.sandbox`, anything but `false`):
+
+| | Sandbox on (default) | `agent.sandbox: false` |
+|---|---|---|
+| Claude Code | `--permission-mode acceptEdits`, tools `Read,Grep,Glob,Edit,Write,Bash`, and settings with `sandbox.enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false` and `permissions.blockReadsOutsideWorkingDirectories` | `--dangerously-skip-permissions` |
+| Codex | `-s workspace-write`, `approval_policy="never"`, no network, the result file as the only extra writable path | `--dangerously-bypass-approvals-and-sandbox` |
+
+With the sandbox on, the agent can change and delete files in the working copy of the change and
+write its result file. Writing anywhere else on the server and network access are refused by the
+CLI's operating-system sandbox (Seatbelt on macOS, bubblewrap on Linux). Claude's file tools and
+shell also cannot read outside the working copy, in read-only calls (guardrail, Discuss,
+dependency audit) as well; Codex's sandbox does not restrict reading. If the sandbox cannot start,
+the call fails and the job with it; nothing runs unprotected.
+
+- Claude Code needs version 2.1.257 or newer and, on Linux, `bubblewrap` and `socat`.
+  `bin/sayandshape doctor` reports what is missing.
+- Switch it off with `bin/sayandshape agent --sandbox off` only where the sandbox cannot start and
+  something else is the fence: inside a container or VM that holds nothing but the sites to edit.
+  The agent then has every permission of the worker's user. `doctor` warns while it is off.
+- The switch lives in `config/apps.json` and is changed on the command line. `api/agent.php` keeps
+  a stored value and ignores one sent to it, so the shared login cannot switch the sandbox off.
+- It does not cover what the site's own code does later: a page the agent wrote runs with the
+  rights of the web server. The guardrail and the diff review address that; a container limits it.
 
 ---
 
@@ -248,6 +285,30 @@ in `/sayandshape-router.php`) or from the path of `app_url`. It serves variants 
 requests and byte ranges, runs PHP pages inside their variant (working directory, `SCRIPT_FILENAME`),
 never serves dot-paths or the router stub from a variant, and redirects root-absolute requests
 that come from a page under `/w/<slug>/` into that variant.
+
+### Cache buster
+
+Every variant has a cache version, a number in `clone_dir/<slug>/.git/sayandshape-cache-version`
+(never served, never committed, not copied into a fork). The worker counts it up whenever it
+publishes a new state of the variant's files: a change, an undo, a reset, a merge, and when it
+withdraws an interrupted publication. A variant without a published change has none.
+
+The router uses it for visitors and logged-in people alike:
+
+- In HTML pages of the variant (static files and the output of PHP pages) it appends `?v=<number>`
+  to `href`, `src` and `poster` of `<link>`, `<script>`, `<img>`, `<source>`, `<video>`, `<audio>`
+  and `<track>` when the address names a stylesheet, script, image, font or media file of the site
+  itself. Addresses of other hosts, `data:` addresses, addresses that already carry a `v=`
+  parameter and module scripts (`type="module"`, `modulepreload`) stay as they are.
+- Every file is sent with `Cache-Control: no-cache` and an `ETag`, so browsers ask again on each use
+  and get a `304` while the file is unchanged. That also covers what a page loads without a tag
+  (images in CSS, imports, `fetch`). A page's `ETag` includes the cache version.
+- PHP output is filtered for page views only (`Accept: text/html` and an HTML response), for visitors
+  in blocks of 1 MiB; API answers, downloads and event streams pass through untouched.
+
+The site's files are not edited for this, so it adds nothing to a change and never locks an undo.
+With `serve: prefix` the live site at its normal address is served by the web server and is not
+covered; the variants under `/w/<slug>/` are.
 
 ### File ownership & git permissions (two-user setups)
 
@@ -284,7 +345,8 @@ group-writable. If web server and daemon run as the **same** user, none of this 
 ### Securing the mutating endpoints
 
 The `submit`/`reset`/`rollback`/`baseline` endpoints enqueue work; `cancel` requests an interruption.
-The worker lets the AI agent edit without its own approval prompts or sandbox
+The worker lets the AI agent edit without approval prompts, inside the agent sandbox (see "The agent
+sandbox"); with `agent.sandbox: false` it runs without any limit
 (`claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`).
 These endpoints, status, and history require `sayandshapeRequireAdmin()` (see "Login and who may do what").
 Set the login password (`bin/sayandshape passwd`) or connect the project's admin session before exposing a project.
@@ -303,10 +365,15 @@ engine, login and worker serve all projects; the worker picks up configuration c
 | Symptom | Cause | Fix |
 |---|---|---|
 | SayAndShape launcher not visible | Not logged in, panel not inserted, or widget not reachable | Log in at `/sayandshape/login/`; run `bin/sayandshape check <id> --url …`; confirm `/sayandshape/api/session.php` returns `{"logged_in":true}`; the page needs a `</body>` tag |
+| Launcher visible on some pages only, or gone after restarting the browser (noticed in Firefox) | Fixed in 1.1.0: pages loaded before the login were reused from the browser cache without the panel, and the session cookie lost its lifetime on the first API call | Update the engine and log in once more. Still missing on single pages: the page has no `</body>`, is served by the web server itself (`serve: prefix`, another host name such as `www.`), or was opened over `http` while the login was made over `https` |
 | Status stuck on processing indicator | Daemon not running | Start daemon: `bash SayAndShape/orchestrator/daemon.sh` |
 | `401 "Not logged in"` on submit/rollback/reset | Session expired or not set | Log in again at `/sayandshape/login/`; with `auth.mode: "host"` check `session_name`/`session_key` and that the session cookie path is `/` |
 | "Unknown project" | The project is not in `config/apps.json` (any more) | `bin/sayandshape list`; run `bin/sayandshape add <folder>` again |
 | Job fails right after "editing"/"checking" | AI agent CLI missing, not signed in for the worker user, or its API key is wrong or unreadable for that user | `bin/sayandshape doctor`; `bin/sayandshape agent --test` as the worker user; see `daemon.log` |
+| Job fails right after "editing" with "Execution failed", `daemon.log` mentions the sandbox | The agent sandbox cannot start: `bubblewrap`/`socat` missing (Linux, Claude Code), or a container that does not allow a nested sandbox | `bin/sayandshape doctor`; install `bubblewrap` and `socat`; inside a container or VM only: `bin/sayandshape agent --sandbox off` |
+| The agent reports it could not do something (download a file, run a command, touch another folder) | The agent sandbox refused it: no network, no writing outside the working copy | Intended. Put the file into the project yourself, or rephrase the request so that it stays inside the site |
+| A request to delete something is blocked | The guardrail allows deleting inside the site, not beyond it; or the pattern filter matched a word (`unlink`, `truncate`, `delete from`, …) | Read the reason in the job status; rephrase ("remove the old gallery page") |
+| Visitors still see an old stylesheet or image | The file is loaded from another host or cached by a proxy in front of the site; or the project uses `serve: prefix` | See "Cache buster"; check the page source for `?v=<number>` and the response for `Cache-Control: no-cache` |
 | Change blocked, "Prompt check failed" or the guardrail's reason | LLM guardrail rejected it (fail-closed) | Check the job status; adapt the guardrail `prompt` in `worker.py` to the app |
 | Job blocked before publication | Prompt or diff review rejected it | Inspect the job status (`blocked_reason`) and daemon log |
 | HTTP 409 on a mutation | An active job in this variant, dependent rollback, stale history, empty baseline, duplicate variant name, or a protected variant | Resume the returned job ID when present; otherwise show the response reason and refresh history |

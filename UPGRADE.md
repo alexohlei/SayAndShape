@@ -7,6 +7,40 @@ engine in `/var/www/SayAndShape`; adjust paths and ID accordingly.
 
 All Git repositories stay local on the server. There is no remote.
 
+## Version 1.1.0: agent sandbox, deleting inside the site, cache buster
+
+Replace the engine files (step 1 below, or `bin/sayandshape update`) and restart the worker.
+Then run `bin/sayandshape doctor`.
+
+- **Agent sandbox, on by default.** Until now the AI agent edited with every permission of the
+  worker's user (`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`).
+  It now runs in the sandbox of its CLI and can write only to the working copy of a change; it has
+  no network access. What an existing installation needs:
+  - Claude Code 2.1.257 or newer (`claude update`).
+  - On Linux with Claude Code: `sudo apt install bubblewrap socat`. Without them every change
+    request fails ("Execution failed") instead of running unprotected; `doctor` reports it as `FAIL`.
+  - Inside a container that cannot start a nested sandbox, and only there, switch it off:
+    `bin/sayandshape agent --sandbox off` (`"sandbox": false` under `agent` in `config/apps.json`).
+  - Requests that relied on the agent fetching something from the internet or touching other
+    folders no longer work. That is the point.
+- **Deleting inside the site is allowed.** The guardrail no longer rejects requests to remove
+  content, pages, images or files of the site itself. It still rejects everything that reaches
+  beyond the site. `max_files_per_change` also limits how many files one request may delete.
+- **Cache buster.** Every published change counts a cache version per variant up; the router
+  appends it to the stylesheets, scripts and images of the pages it serves (`?v=12`) and sends all
+  files with `Cache-Control: no-cache`. Nothing has to be configured. A project with its own
+  `sayandshape-router.php` ("custom version" in `doctor`) does not get this.
+- The diff review also blocks `shell_exec`, `popen` and `pcntl_exec` in added code.
+- **Edit button missing on some pages or after a browser restart** (seen mostly in Firefox), two
+  causes, both fixed:
+  - Pages a browser had loaded before the login were reused from its cache, without the panel.
+    Pages are now revalidated and count as changed once the panel is part of them.
+  - Every API call set the session cookie again without lifetime, `HttpOnly` and `SameSite`. The
+    login then ended with the browser session while the button's hint cookie stayed for 14 days,
+    and scripts of the site could read the session ID. With `auth.mode: "host"` the same happened
+    to the app's own session cookie. People who are logged in should log in once more after the
+    update, so that their cookie gets its attributes back.
+
 ## English or German interface
 
 From this version on, the panel, the login page, the setup page and the worker's messages (job
