@@ -44,6 +44,9 @@ a three-line `sayandshape-router.php` and, on Apache, one block in `.htaccess`.
 > **SayAndShape lets an AI agent change files on your server.** Run it in an isolated environment,
 > ideally a container or a small VM that holds only the sites it may edit, and keep the agent's
 > sandbox switched on. Please read [Safety](#safety) before you install it on a machine that matters.
+>
+> The sandbox is **on by default**: the agent can change and delete files of the site it is working
+> on and nothing else on the server. [How it works and how to switch it off](#the-agent-sandbox).
 
 ### By hand
 
@@ -202,14 +205,8 @@ No other customers' sites, no databases you cannot afford to lose, no SSH keys, 
 backups within reach. Let the worker run as its own unprivileged user without `sudo`. If something
 does go wrong, the damage ends at the container wall and you rebuild it.
 
-**Keep the agent's sandbox on.** It is on by default. Claude Code and Codex then run in their own
-operating-system sandbox while they edit: they can change and delete files in the working copy of a
-change and write their result file, and that is all. Writing anywhere else and network access are
-refused; Claude's file tools cannot read outside the copy either. On Linux, Claude Code needs
-`bubblewrap` and `socat` for this; if they are missing, a change request fails instead of running
-unprotected, and `bin/sayandshape doctor` tells you. `bin/sayandshape agent --sandbox off` switches
-it off. Do that only inside a container that cannot start a nested sandbox, where the container is
-the fence.
+**Keep the agent's sandbox on.** It is on by default and keeps the agent inside the working copy
+of a change; see [The agent sandbox](#the-agent-sandbox) below for what it does and how to switch it.
 
 **Give Claude or Codex only what the job needs.** Use a dedicated API key or account with a spending
 limit, not a personal login that opens other doors. Keep the worker user's agent configuration
@@ -226,6 +223,38 @@ Two limits to know about. Reading is fenced in less tightly than writing: Codex 
 worker user can read, so keep secrets out of that user's reach. And a page the agent writes runs
 later with the rights of the web server, like any other page of the site, which is one more reason
 for the container. SayAndShape is MIT-licensed software and comes without warranty.
+
+### The agent sandbox
+
+While it edits, Claude Code or Codex runs in the operating-system sandbox of its own CLI. Nothing
+has to be set up for that on macOS; on Linux, Claude Code needs `bubblewrap` and `socat`
+(`apt install bubblewrap socat`).
+
+| With the sandbox on (default) | |
+|---|---|
+| Change and delete files in the working copy of the change | ✅ |
+| Write anywhere else on the server (other sites, the engine, the home folder, system files) | ❌ |
+| Network access (downloads, calls to other systems) | ❌ |
+| Read outside the working copy | ❌ with Claude Code; Codex can read what the worker user can |
+
+If the sandbox cannot start, a change request fails instead of running unprotected, and
+`bin/sayandshape doctor` says what is missing.
+
+```sh
+bin/sayandshape agent                 # shows the agent in use and "sandbox on" or "sandbox OFF"
+bin/sayandshape agent --sandbox off   # switch it off
+bin/sayandshape agent --sandbox on    # switch it back on (the default)
+```
+
+The switch takes effect with the next change request; the worker does not need a restart. It is
+stored as `"sandbox": false` under `agent` in `config/apps.json` and can only be changed on the
+server's command line, not in the browser, so nobody can switch it off with the login password alone.
+
+**Switch it off only where something else is the fence:** inside a container or VM that holds
+nothing but the sites to edit, typically because a sandbox cannot be started inside that container.
+Without it the agent has every permission of the worker's user: it can read, change and delete
+whatever that user can, and reach the network. `bin/sayandshape doctor` shows a warning for as long
+as it is off.
 
 ## Documentation
 
