@@ -412,6 +412,12 @@ return false;
         self.assertEqual((code, data['language'], data['agent']['engine']), (200, 'en', 'codex'))
         self.assertEqual((config()['language'], config()['agent']['codex_model'], config()['apps']['demo']['clone_dir']),
                          ('en', 'gpt-6-sol', str(self.clone.parent)))
+        # The agent sandbox is switched on the command line only: the page keeps a stored value and cannot set one.
+        data = config()
+        data['agent']['sandbox'] = False
+        (self.root / 'config/apps.json').write_text(json.dumps(data))
+        code, data = self.request('agent.php', {'effort': 'low', 'sandbox': True})
+        self.assertEqual((code, config()['agent']['effort'], config()['agent']['sandbox']), (200, 'low', False))
 
     def test_login_and_setup_pages_follow_language(self):
         status, html = self.page('/login/', self.anon)

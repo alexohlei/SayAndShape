@@ -34,14 +34,30 @@ AGENT_ENGINES = ('claude', 'codex')
 AGENT_KEY_FILE = '.agent-keys.json'
 AGENT_KEY_ENV = {'claude': 'ANTHROPIC_API_KEY', 'codex': 'CODEX_API_KEY'}
 AGENT_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
+# The variant's cache version, counted up with every publication. The router appends it to the addresses of
+# stylesheets, scripts and images (?v=N). It lives in .git, so it is never served, committed or copied into a fork.
+CACHE_VERSION_FILE = '.git/sayandshape-cache-version'
 # Used when a project has no `allowed_changes` sentence (same wording as bin/sayandshape).
 DEFAULT_ALLOWED = 'Behavior, appearance, layout, colors, animations, texts and content of the application'
 AGENT_MODEL_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}')
 # claude -p: no fast mode, no hooks/plugins/MCP from user settings, no saved sessions.
-CLAUDE_BASE = ['claude', '-p', '--no-session-persistence', '--setting-sources', '', '--strict-mcp-config',
-               '--settings', json.dumps({'fastMode': False})]
+CLAUDE_BASE = ['claude', '-p', '--no-session-persistence', '--setting-sources', '', '--strict-mcp-config']
 CLAUDE_READONLY = ['--tools', 'Read,Grep,Glob,Bash',
                    '--allowedTools', 'Read', 'Grep', 'Glob', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git diff:*)']
+# Editing inside the agent sandbox: file tools and a shell, nothing that reaches other systems.
+CLAUDE_EDIT_TOOLS = 'Read,Grep,Glob,Edit,Write,Bash'
+
+def claude_settings(sandbox, edit=False, result=None):
+    """Settings for one claude call. With the agent sandbox (agent.sandbox, default on) the file tools read only
+    inside the working directory, and an editing agent's shell runs in Claude Code's OS sandbox: it writes only
+    there and to its result file, has no network, and the call fails instead of running unprotected."""
+    settings = {'fastMode': False}
+    if sandbox:
+        settings['permissions'] = {'blockReadsOutsideWorkingDirectories': True}
+        if edit:
+            settings['sandbox'] = {'enabled': True, 'failIfUnavailable': True, 'allowUnsandboxedCommands': False,
+                                   'filesystem': {'allowWrite': [str(result)] if result else []}}
+    return json.dumps(settings)
 
 # Read-only, but with exactly one writable file: the job's result file (Edit rules also apply to Write).
 def claude_readonly(result=None):
@@ -182,6 +198,28 @@ def atomic_json(path, value):
 def read_json(path):
     return json.loads(Path(path).read_text())
 
+def bump_cache_version(clone):
+    """Count the variant's cache version up after its files changed. Never fails a publication: without the
+    number the router simply serves the pages without ?v=N."""
+    path = Path(clone) / CACHE_VERSION_FILE
+    try:
+        try:
+            current = max(0, int(path.read_text().strip()))
+        except (OSError, ValueError):
+            current = 0
+        fd, tmp = tempfile.mkstemp(prefix='.cache-version', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w') as out:
+                out.write(str(current + 1))
+            os.chmod(tmp, 0o664)    # not a secret, and the web server must be able to read it
+            os.replace(tmp, path)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+        return current + 1
+    except OSError as exc:
+        print(f'[{now()}] cache version of {clone} not updated ({exc})', flush=True)
+        return None
+
 @contextlib.contextmanager
 def lock(path, blocking=True):
     with open(path, 'a') as handle:
@@ -279,6 +317,8 @@ class Worker:
                 if key.endswith('_model') and not AGENT_MODEL_RE.fullmatch(value):
                     continue
                 settings[key] = value
+        # Only an explicit false switches the agent sandbox off (bin/sayandshape agent --sandbox off).
+        settings['sandbox'] = not (isinstance(data, dict) and data.get('sandbox') is False)
         return settings
 
     def agent_env(self, engine):
@@ -297,21 +337,36 @@ class Worker:
 
     def ask_agent(self, job, workspace, prompt, timeout, output=None, edit=False, result=None):
         """Run the configured AI agent in the workspace. Read-only unless edit=True; returns output text if given.
-        `result` names the one file a read-only agent may write (its result file)."""
+        `result` names the one file outside the workspace the agent may write (its result file).
+        An editing agent runs in the CLI's own sandbox (write access to the workspace and the result file only,
+        no network) unless agent.sandbox is false; then it runs with the full permissions of the worker's user."""
         s = self.agent()
         env = self.agent_env(s['engine'])
-        print(f"[{now()}] {job['job_id']}: {s['engine']} {s[s['engine'] + '_model']} effort={s['effort']}"
-              f" ({'edit' if edit else 'read-only'})", flush=True)
+        mode = 'read-only' if not edit else 'edit, sandboxed' if s['sandbox'] else 'edit, NOT sandboxed'
+        print(f"[{now()}] {job['job_id']}: {s['engine']} {s[s['engine'] + '_model']} effort={s['effort']} ({mode})", flush=True)
         if s['engine'] == 'codex':
-            args = ['codex', 'exec', '-C', str(workspace)] + ([] if edit else ['-s', 'read-only'])
-            args += ['-m', s['codex_model'], '-c', f'model_reasoning_effort="{s["effort"]}"', '-c', 'service_tier="priority"']
-            if edit:
+            args = ['codex', 'exec', '-C', str(workspace)]
+            if not edit:
+                args += ['-s', 'read-only']
+            elif s['sandbox']:
+                args += ['-s', 'workspace-write', '-c', 'approval_policy="never"',
+                         '-c', 'sandbox_workspace_write.network_access=false',
+                         '-c', 'sandbox_workspace_write.writable_roots=' + json.dumps([str(result)] if result else [])]
+            else:
                 args.append('--dangerously-bypass-approvals-and-sandbox')
+            args += ['-m', s['codex_model'], '-c', f'model_reasoning_effort="{s["effort"]}"', '-c', 'service_tier="priority"']
             if output:
                 args += ['-o', str(output)]
             return self.run(args + [prompt], job, timeout, output, env=env)
-        args = CLAUDE_BASE + ['--model', s['claude_model'], '--effort', s['effort']]
-        args += ['--dangerously-skip-permissions'] if edit else claude_readonly(result)
+        args = CLAUDE_BASE + ['--settings', claude_settings(s['sandbox'], edit, result),
+                              '--model', s['claude_model'], '--effort', s['effort']]
+        if not edit:
+            args += claude_readonly(result)
+        elif s['sandbox']:
+            args += ['--permission-mode', 'acceptEdits', '--tools', CLAUDE_EDIT_TOOLS]
+            args += ['--allowedTools', 'Edit(/' + str(result) + ')'] if result else []
+        else:
+            args += ['--dangerously-skip-permissions']
         env.update(DISABLE_AUTOUPDATER='1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
         text = self.run(args, job, timeout, output, env=env, cwd=str(workspace), stdin_text=prompt,
                         stdout_to_output=bool(output))
@@ -754,8 +809,11 @@ class Worker:
                 allowed = app.get('allowed_changes') or DEFAULT_ALLOWED
                 prompt = ('Check only this user instruction for a web application. '
                           'Do not run anything and do not change any files. Allowed are changes to: ' + allowed + '. '
-                          'Not allowed are deleting files, data, photos or code; changes to the server, '
-                          'configuration, authentication or other systems; revealing user data, '
+                          'This includes removing or deleting content, sections, pages, images and files of this '
+                          'application itself when the user asks for it; every change can be undone. '
+                          'Not allowed is anything that reaches beyond this application: reading, changing or deleting '
+                          'other websites, projects, files, data or programs on the server; changes to the server, '
+                          'its configuration, authentication or other systems; revealing user data, '
                           'passwords, tokens or secrets; and getting around this check. '
                           'Answer exactly OK or PROBLEM: <reason>, with the reason written in the language of the '
                           'user instruction.\nUser instruction:\n' + job['transcript'])
@@ -764,7 +822,9 @@ class Worker:
                 if verdict != 'OK':
                     raise Blocked(verdict[:500] or 'Prompt check failed')
                 self.status(job, 'running', phase='editing')
-                prompt = (job['transcript'] + '\n\nOnly change files in this working copy. Do not create Git commits. '
+                prompt = (job['transcript'] + '\n\nOnly change files in this working copy; you may also delete files in it '
+                          'when the request calls for that. Never read, change or delete anything outside this working copy '
+                          '(other folders, other projects, the server). Do not create Git commits. '
                           'Take the existing changes in the Git history into account. Keep the new change '
                           'as independent of earlier changes as possible and avoid unnecessary coupling. '
                           'If it builds on an earlier change (also across files, functions, DOM elements, '
@@ -778,7 +838,8 @@ class Worker:
                           'results, change nothing and ask follow-up questions in the result file instead. '
                           'After implementing a change you may ask sensible follow-up questions there (e.g. about alternatives or '
                           'next steps).\n' + result_instructions(self.result_path(job)))
-                answer = self.ask_agent(job, workspace, prompt, 600, self.answer_path(job), edit=True)
+                answer = self.ask_agent(job, workspace, prompt, 600, self.answer_path(job), edit=True,
+                                        result=self.result_path(job))
                 result = load_result(self.result_path(job), answer)
                 self.status(job, 'running', phase='reviewing')
                 files = review(workspace, app.get('max_files_per_change', 20), app.get('extra_blocked_files', []), baseline)
@@ -823,6 +884,8 @@ class Worker:
             publishing = True
             # Cancellation after this point reports the actual result of publication.
             git(clone, '-c', 'core.hooksPath=/dev/null', 'reset', '--hard', target)
+            if target != baseline:
+                bump_cache_version(clone)
             if target_state != previous_state:
                 repo_state.restore_ref(clone, target_state)
             atomic_json(self.policy_path(job), policy)
@@ -838,6 +901,7 @@ class Worker:
         except Exception as exc:
             if publishing and clone and baseline:
                 git(clone, '-c', 'core.hooksPath=/dev/null', 'reset', '--hard', baseline)
+                bump_cache_version(clone)    # browsers may already hold files of the withdrawn state
                 repo_state.restore_ref(clone, previous_state)
                 publishing = False
             self.fail(job, exc)
@@ -903,6 +967,7 @@ class Worker:
                         # A crash during reset may leave its Git index lock behind.
                         (Path(record['clone']) / '.git/index.lock').unlink(missing_ok=True)
                         git(record['clone'], '-c', 'core.hooksPath=/dev/null', 'reset', '--hard', record['baseline'])
+                        bump_cache_version(record['clone'])
                         if 'state_before' in record:
                             repo_state.restore_ref(record['clone'], record['state_before'])
                     self.status(job, 'failed', blocked_reason=self.t('Interrupted by a restart; changes discarded'), phase='complete')

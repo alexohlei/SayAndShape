@@ -23,7 +23,9 @@ def review(root, maximum=20, blocked_files=(), baseline='HEAD'):
     if len(names) > maximum:
         raise Blocked(f'too many files ({len(names)} > {maximum})')
     sensitive = re.compile(r'(^|/)(\.env(?:\..*)?|config\.php|\.htpasswd|id_rsa)$|\.pem$', re.I)
-    dangerous = re.compile(rb'\b(?:system|passthru|proc_open)\s*\(|rm\s+-rf\b|\b(?:DROP|TRUNCATE)\s+TABLE\b', re.I)
+    # Code that would run programs on the server (and so reach beyond the site), or wipe data.
+    dangerous = re.compile(rb'\b(?:system|passthru|proc_open|shell_exec|popen|pcntl_exec)\s*\(|rm\s+-rf\b'
+                           rb'|\b(?:DROP|TRUNCATE)\s+TABLE\b', re.I)
     changed = []
     for raw in sorted(names):
         name = os.fsdecode(raw)

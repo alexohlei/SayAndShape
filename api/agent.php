@@ -2,6 +2,8 @@
 // Engine settings: GET returns them, POST saves them in config/apps.json → "agent" (AI agent for all projects)
 // and "language" (interface language, see api/i18n.php).
 // The worker reads the settings again for every job (orchestrator/worker.py, Worker.agent()).
+// "agent.sandbox" is deliberately not changeable here: switching the agent sandbox off needs the command line
+// (bin/sayandshape agent --sandbox off), not just the shared login. A stored value is kept as it is.
 require_once __DIR__ . '/auth.php';
 sayandshapeRequireEngineAdmin();
 $configPath = sayandshapeEngineDir() . '/config/apps.json';
@@ -69,7 +71,7 @@ if (array_key_exists('effort', $body)) {
     if (!in_array($body['effort'], SAYANDSHAPE_AGENT_EFFORTS, true)) sayandshapeFail('Effort: invalid value');
     $agent['effort'] = $body['effort'];
 }
-$config['agent'] = $agent;
+$config['agent'] = $agent + (is_array($config['agent'] ?? null) ? $config['agent'] : []);
 $config['language'] = $language;
 try { sayandshapeAtomicJson($configPath, $config, true); } catch (Throwable $e) { sayandshapeFail('Configuration could not be saved (write permission on config/?)', 503); }
 sayandshapeJsonResponse(['success' => true, 'agent' => $agent, 'language' => $language]);

@@ -3,7 +3,8 @@
 
     bin/sayandshape init                 create config and working directories
     bin/sayandshape doctor               check prerequisites, configuration and wiring
-    bin/sayandshape agent [options]      show the AI agents found, choose one, store or remove an API key
+    bin/sayandshape agent [options]      show the AI agents found, choose one, store or remove an API key,
+                                         switch the agent sandbox (--sandbox on|off)
     bin/sayandshape add PATH [options]   register a project and wire it to the engine
     bin/sayandshape remove ID            unregister a project and remove the wiring
     bin/sayandshape list                 registered projects
@@ -50,7 +51,10 @@ DEFAULT_ALLOWED = 'Behavior, appearance, layout, colors, animations, texts and c
 DEFAULT_BLOCKED = ['.env', 'config.php', '.htaccess', STUB]
 # Interface language of the panel, login, setup page and worker messages (changed on /sayandshape/setup/).
 LANGUAGES = {'en': 'English', 'de': 'Deutsch'}
-AGENT_DEFAULTS = {'engine': 'claude', 'claude_model': 'claude-opus-5-5', 'codex_model': 'gpt-6.1-terra', 'effort': 'medium'}
+AGENT_DEFAULTS = {'engine': 'claude', 'claude_model': 'claude-opus-5-5', 'codex_model': 'gpt-6.1-terra', 'effort': 'medium',
+                  'sandbox': True}
+# Reads outside the working copy are blocked from this Claude Code version on (permissions.blockReadsOutsideWorkingDirectories).
+CLAUDE_SANDBOX_VERSION = (2, 1, 257)
 # API keys live outside config/ (which is shared with the web server's group) and are readable by the worker user only.
 KEYS = ENGINE / '.agent-keys.json'
 AGENTS = {
@@ -481,6 +485,20 @@ def cmd_doctor(args):
     else:
         report('OK', f'AI agent "{binary}" found ({probe["path"]}); '
                      + ('signed in' if probe['logged_in'] else 'sign-in cannot be checked'))
+    if agent_settings(config or {})['sandbox'] is False:
+        report('WARN', 'Agent sandbox is off: the AI agent can read and change everything the worker user can. '
+                       'Keep it off only inside a container or VM that holds nothing else (bin/sayandshape agent --sandbox on)')
+    elif probe['path']:
+        missing = [tool for tool in ('bwrap', 'socat') if not shutil.which(tool)] if binary == 'claude' and sys.platform.startswith('linux') else []
+        old = binary == 'claude' and probe['version'] and tuple(map(int, probe['version'].split('.'))) < CLAUDE_SANDBOX_VERSION
+        if missing:
+            report('FAIL', f'Agent sandbox: {" and ".join(missing)} not found, so change requests will fail. Install bubblewrap and socat '
+                           '(apt install bubblewrap socat), or, inside a container or VM only: bin/sayandshape agent --sandbox off')
+        elif old:
+            report('WARN', f'Agent sandbox: Claude Code {probe["version"]} does not block reads outside the working copy yet; '
+                           f'update it to {".".join(map(str, CLAUDE_SANDBOX_VERSION))} or newer')
+        else:
+            report('OK', 'Agent sandbox on: the AI agent writes only inside the working copy of a change')
     for name in ('jobs', 'clones', 'config'):
         path = ENGINE / name
         report('OK' if path.is_dir() and os.access(path, os.W_OK) else 'FAIL', f'{name}/ {"writable" if os.access(path, os.W_OK) else "missing or not writable"}')
@@ -638,6 +656,7 @@ def agent_settings(config):
     agent = dict(AGENT_DEFAULTS, **saved)
     if agent.get('engine') not in AGENTS:
         agent['engine'] = AGENT_DEFAULTS['engine']
+    agent['sandbox'] = agent.get('sandbox') is not False      # only an explicit false switches it off
     return agent
 
 
@@ -715,7 +734,7 @@ def check_key(name, key):
     return key
 
 
-def agent_setup(engine=None, key=None, login=False, first_run=False, interactive=False):
+def agent_setup(engine=None, key=None, login=False, first_run=False, interactive=False, sandbox=None):
     """Show the agents found and apply a choice. Returns (settings, keys, probes)."""
     config = load_config()
     agent = agent_settings(config)
@@ -756,21 +775,27 @@ def agent_setup(engine=None, key=None, login=False, first_run=False, interactive
         keys.pop(engine, None)
     if key or login:
         save_keys(keys)
-    if engine != agent['engine'] or not isinstance(config.get('agent'), dict):
-        agent['engine'] = engine
+    if sandbox is None:
+        sandbox = agent['sandbox'] is not False
+    if engine != agent['engine'] or sandbox != agent['sandbox'] or not isinstance(config.get('agent'), dict):
+        agent['engine'], agent['sandbox'] = engine, sandbox
         config['agent'] = agent
         save_config(config)
 
     info, probe = AGENTS[engine], probes[engine]
     say(f'Using: {engine} ({agent[engine + "_model"]}), '
-        + (f'API key in {KEYS}' if engine in keys else 'the CLI\'s own sign-in'))
+        + (f'API key in {KEYS}' if engine in keys else 'the CLI\'s own sign-in')
+        + (', sandbox on' if agent['sandbox'] else ', sandbox OFF'))
+    if not agent['sandbox']:
+        say('  Warning: without the sandbox the agent can read and change everything the worker user can. '
+            'Keep it off only inside a container or VM that holds nothing else.')
     if not probe['path']:
         say(f'  Warning: {engine} is not installed. Install it: {info["install"]}')
     elif engine not in keys and probe['logged_in'] is False:
         say(f'  Warning: {engine} is not signed in. Run "{info["login"]}" as the worker user '
             'or store an API key: bin/sayandshape agent --api-key-stdin')
     if not interactive:
-        say('  Change: bin/sayandshape agent --engine claude|codex [--api-key-stdin | --login]')
+        say('  Change: bin/sayandshape agent --engine claude|codex [--api-key-stdin | --login] [--sandbox on|off]')
     return agent, keys, probes
 
 
@@ -780,8 +805,9 @@ def cmd_agent(args):
         key = sys.stdin.readline().strip()
         if not key:
             raise Problem('No API key on standard input')
-    changing = bool(args.engine or key or args.login)
-    agent, keys, probes = agent_setup(args.engine, key, args.login, interactive=not changing and not args.test and terminal())
+    changing = bool(args.engine or key or args.login or args.sandbox)
+    agent, keys, probes = agent_setup(args.engine, key, args.login, interactive=not changing and not args.test and terminal(),
+                                      sandbox=None if not args.sandbox else args.sandbox == 'on')
     if not args.test:
         return 0
     engine = agent['engine']
@@ -974,6 +1000,9 @@ def main():
     auth = agent.add_mutually_exclusive_group()
     auth.add_argument('--api-key-stdin', action='store_true', help='read an API key for the agent from standard input and store it')
     auth.add_argument('--login', action='store_true', help="remove the stored API key; the agent uses the CLI's own sign-in")
+    agent.add_argument('--sandbox', choices=['on', 'off'],
+                       help='on (default): the agent writes only inside the working copy of a change. '
+                            'off: full permissions of the worker user; only inside a container or VM')
     agent.add_argument('--test', action='store_true', help='call the agent once with a one-word request (uses tokens)')
     agent.set_defaults(run=cmd_agent)
 

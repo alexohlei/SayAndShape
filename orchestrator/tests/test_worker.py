@@ -94,6 +94,14 @@ class EngineTests(unittest.TestCase):
     def test_new_php_pattern_blocked(self):
         (self.clone / 'new.php').write_text('<?php system ("echo test");')
         with self.assertRaises(Blocked): review(self.clone)
+        for call in ('shell_exec("ls /")', 'popen("ls /", "r")', 'pcntl_exec("/bin/sh")'):
+            (self.clone / 'new.php').write_text('<?php ' + call + ';')
+            with self.assertRaises(Blocked): review(self.clone)
+
+    def test_deleted_files_and_harmless_calls_pass_the_review(self):
+        (self.clone / 'style.css').unlink()
+        (self.clone / 'app.js').write_text('const m = /a/.exec(text); curl_exec(handle);')
+        self.assertEqual(review(self.clone), ['app.js', 'style.css'])
 
     def test_configured_file_blocked(self):
         (self.clone / 'admin/auth.php').write_text('<?php // changed')
@@ -469,8 +477,14 @@ class EngineTests(unittest.TestCase):
                            'prompt=sys.stdin.read()\n'
                            'with open(%r, "a") as f: f.write(json.dumps(a[1:]) + "\\n")\n'
                            'assert a[a.index("--model")+1]=="claude-opus-5-5" and a[a.index("--effort")+1]=="medium"\n'
-                           'assert json.loads(a[a.index("--settings")+1])=={"fastMode": False} and "-p" in a and prompt\n'
-                           'if "--dangerously-skip-permissions" in a: Path("style.css").write_text("body{color:green}\\n")\n'
+                           'settings=json.loads(a[a.index("--settings")+1])\n'
+                           'assert settings["fastMode"] is False and "-p" in a and prompt\n'
+                           'assert settings["permissions"]=={"blockReadsOutsideWorkingDirectories": True}\n'
+                           'if "--permission-mode" in a:\n'
+                           '    box=settings["sandbox"]\n'
+                           '    assert box["enabled"] and box["failIfUnavailable"] and box["allowUnsandboxedCommands"] is False\n'
+                           '    assert box["filesystem"]["allowWrite"][0].endswith("j_test_1.result.json")\n'
+                           '    Path("style.css").write_text("body{color:green}\\n")\n'
                            'else: print("OK")\n' % str(log))
         claude.chmod(0o755)
         self.job()
@@ -487,8 +501,9 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(self.status()['status'], 'done')
             self.assertIn('green', (self.clone / 'style.css').read_text())
             calls = [json.loads(line) for line in log.read_text().splitlines()]
-            self.assertTrue(any('--dangerously-skip-permissions' in c for c in calls))
-            self.assertTrue(all('--dangerously-skip-permissions' in c or '--tools' in c for c in calls))
+            self.assertTrue(any(c[c.index('--permission-mode') + 1] == 'acceptEdits' for c in calls if '--permission-mode' in c))
+            self.assertFalse(any('--dangerously-skip-permissions' in c for c in calls))
+            self.assertTrue(all('--tools' in c for c in calls))
         finally:
             proc.terminate()
             proc.wait(5)
@@ -500,7 +515,8 @@ class EngineTests(unittest.TestCase):
         binary.mkdir()
         codex = binary / 'codex'
         codex.write_text('#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\na=sys.argv\n'
-                         'if "--dangerously-bypass-approvals-and-sandbox" not in a: Path(a[a.index("-o")+1]).write_text("OK")\n'
+                         'assert "--dangerously-bypass-approvals-and-sandbox" not in a\n'
+                         'if a[a.index("-s")+1] != "workspace-write": Path(a[a.index("-o")+1]).write_text("OK")\n'
                          'else: (Path(a[a.index("-C")+1])/"style.css").write_text("body{color:blue}\\n")\n')
         codex.chmod(0o755)
         self.job()
@@ -544,6 +560,94 @@ class EngineTests(unittest.TestCase):
             # Without a usable key file the agent runs with its own login.
             (self.engine / '.agent-keys.json').write_text('broken')
             self.assertNotIn('CODEX_API_KEY', self.worker.agent_env('codex'))
+
+    def agent_calls(self, agent):
+        """Arguments of a read-only and an editing agent call under the given agent settings."""
+        worker.atomic_json(self.engine / 'config/apps.json', {'apps': {'demo': self.app}, 'agent': agent})
+        job, _ = self.job()
+        seen = []
+        with patch.object(self.worker, 'run', side_effect=lambda args, *rest, **kw: seen.append(args) or ''):
+            self.worker.ask_agent(job, self.clone, 'check', 10)
+            self.worker.ask_agent(job, self.clone, 'edit', 10, edit=True, result=self.worker.result_path(job))
+        return seen[0], seen[1], str(self.worker.result_path(job))
+
+    def test_claude_edits_inside_the_agent_sandbox_unless_it_is_switched_off(self):
+        check, edit, result = self.agent_calls({'engine': 'claude'})
+        self.assertNotIn('--dangerously-skip-permissions', edit)
+        self.assertEqual(edit[edit.index('--permission-mode') + 1], 'acceptEdits')
+        self.assertEqual(edit[edit.index('--tools') + 1], 'Read,Grep,Glob,Edit,Write,Bash')
+        self.assertEqual(edit[edit.index('--allowedTools') + 1], 'Edit(/' + result + ')')
+        settings = json.loads(edit[edit.index('--settings') + 1])
+        self.assertEqual(settings['sandbox'], {'enabled': True, 'failIfUnavailable': True, 'allowUnsandboxedCommands': False,
+                                               'filesystem': {'allowWrite': [result]}})
+        self.assertTrue(settings['permissions']['blockReadsOutsideWorkingDirectories'])
+        # Read-only calls keep their tool list; they only lose the view beyond the working directory.
+        settings = json.loads(check[check.index('--settings') + 1])
+        self.assertEqual(settings, {'fastMode': False, 'permissions': {'blockReadsOutsideWorkingDirectories': True}})
+        self.assertEqual(check[check.index('--tools') + 1], 'Read,Grep,Glob,Bash')
+
+        # Anything but an explicit false keeps the sandbox on.
+        for value in ('off', 0, None, 'false'):
+            self.assertIn('--permission-mode', self.agent_calls({'engine': 'claude', 'sandbox': value})[1])
+        check, edit, _ = self.agent_calls({'engine': 'claude', 'sandbox': False})
+        self.assertIn('--dangerously-skip-permissions', edit)
+        self.assertNotIn('--permission-mode', edit)
+        self.assertEqual(json.loads(edit[edit.index('--settings') + 1]), {'fastMode': False})
+        self.assertNotIn('--dangerously-skip-permissions', check)
+
+    def test_codex_edits_inside_the_agent_sandbox_unless_it_is_switched_off(self):
+        check, edit, result = self.agent_calls({'engine': 'codex'})
+        self.assertEqual(check[check.index('-s') + 1], 'read-only')
+        self.assertEqual(edit[edit.index('-s') + 1], 'workspace-write')
+        self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', edit)
+        self.assertIn('sandbox_workspace_write.writable_roots=' + json.dumps([result]), edit)
+        self.assertIn('sandbox_workspace_write.network_access=false', edit)
+        self.assertIn('approval_policy="never"', edit)
+        check, edit, _ = self.agent_calls({'engine': 'codex', 'sandbox': False})
+        self.assertIn('--dangerously-bypass-approvals-and-sandbox', edit)
+        self.assertNotIn('workspace-write', edit)
+        self.assertEqual(check[check.index('-s') + 1], 'read-only')
+
+    def test_deleting_inside_the_site_is_published_and_can_be_undone(self):
+        (self.clone / 'old.html').write_text('old page')
+        self.baseline = self.commit('baseline with a page to delete')
+        seen = []
+        ask = self.worker.ask_agent
+        job, path = self.job(transcript='Delete the old page')
+        with self.fake_edit(lambda space: (space / 'old.html').unlink()), \
+                patch.object(self.worker, 'ask_agent', side_effect=lambda *a, **kw: seen.append(a[2]) or ask(*a, **kw)):
+            self.worker.process(path)
+        status = self.status()
+        self.assertEqual((status['status'], status['files_changed']), ('done', ['old.html']))
+        self.assertFalse((self.clone / 'old.html').exists())
+        guard, edit = seen[0], seen[1]
+        self.assertIn('removing or deleting content, sections, pages, images and files of this application itself', guard)
+        self.assertIn('Not allowed is anything that reaches beyond this application', guard)
+        self.assertIn('you may also delete files in it', edit)
+        self.assertIn('Never read, change or delete anything outside this working copy', edit)
+        job, path = self.job('rollback', job_id='j_test_2', commit_hash=status['commit_hash'])
+        self.worker.process(path)
+        self.assertEqual(worker.read_json(self.worker.jobs / 'j_test_2.status.json')['status'], 'done')
+        self.assertEqual((self.clone / 'old.html').read_text(), 'old page')
+
+    def test_cache_version_counts_up_with_every_published_state(self):
+        version = self.clone / '.git/sayandshape-cache-version'
+        self.assertFalse(version.exists())
+        job, path = self.job()
+        with self.fake_edit(lambda space: (space / 'style.css').write_text('blue')): self.worker.process(path)
+        self.assertEqual((self.status()['status'], version.read_text()), ('done', '1'))
+        self.assertTrue(version.stat().st_mode & 0o004)       # readable for the web server
+        self.assertEqual(worker.git(self.clone, 'status', '--porcelain'), '')
+        # A request that changes nothing publishes nothing and keeps the number.
+        job, path = self.job(job_id='j_test_2')
+        with self.fake_edit(lambda space: None): self.worker.process(path)
+        self.assertEqual((worker.read_json(self.worker.jobs / 'j_test_2.status.json')['status'], version.read_text()), ('done', '1'))
+        # Undo is a published state as well.
+        job, path = self.job('rollback', job_id='j_test_3', commit_hash=self.status()['commit_hash'])
+        self.worker.process(path)
+        self.assertEqual((worker.read_json(self.worker.jobs / 'j_test_3.status.json')['status'], version.read_text()), ('done', '2'))
+        version.write_text('not a number')
+        self.assertEqual(worker.bump_cache_version(self.clone), 1)
 
     def test_cancel_kills_process_group(self):
         job, _ = self.job()
@@ -711,7 +815,7 @@ class EngineTests(unittest.TestCase):
         # The fake editor only finishes once a second job is editing at the same time.
         codex = binary / 'codex'
         codex.write_text('#!/usr/bin/env python3\nimport sys, time\nfrom pathlib import Path\na=sys.argv\n'
-                         'if "--dangerously-bypass-approvals-and-sandbox" not in a: Path(a[a.index("-o")+1]).write_text("OK"); sys.exit(0)\n'
+                         'if a[a.index("-s")+1] != "workspace-write": Path(a[a.index("-o")+1]).write_text("OK"); sys.exit(0)\n'
                          'space=Path(a[a.index("-C")+1]); b=Path(%r)\n'
                          '(b / space.name).write_text("here")\n'
                          'for _ in range(200):\n'

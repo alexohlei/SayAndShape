@@ -24,6 +24,7 @@
     "engine": "claude",
     "claude_model": "claude-opus-5-5",
     "codex_model": "gpt-6.1-terra",
-    "effort": "medium"
+    "effort": "medium",
+    "sandbox": true
   }
 }
