@@ -459,9 +459,12 @@ async function runWidgetTests(source) {
     assert(get('root').className === 'rs-docked rs-docked-right' && get('panel').style.width === '420px', 'Dock right failed');
     get('dock-swap').click();
     assert(get('root').className === 'rs-docked rs-docked-left' && app.storage.get('sayandshape:/sayandshape:dock') === 'left', 'Side not swapped or remembered');
+    const next = await mount(app.storage);
+    assert(next.nodes.get('sayandshape-panel').hidden === false && next.nodes.get('sayandshape-root').className === 'rs-docked rs-docked-left', 'Docked panel did not stay open on the next page');
     get('minimize').click();
     assert(get('root').className === '', 'Closed helper keeps the dock strip');
     const again = await mount(app.storage);
+    assert(again.nodes.get('sayandshape-panel').hidden === true, 'Minimized panel reopened on the next page');
     again.nodes.get('sayandshape-launcher').click();
     assert(again.nodes.get('sayandshape-root').className === 'rs-docked rs-docked-left', 'Dock not restored');
     again.nodes.get('sayandshape-dock-toggle').click();

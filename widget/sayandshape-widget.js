@@ -641,6 +641,8 @@
     restoreResult();
     resumeJob();
     if (onceFlag('reopen')) { onceFlag('reopen', null); open(); }
+    // A docked panel is part of the window: it stays open from page to page until it is minimized.
+    else if (engineStored('open') && dockFits()) open(true);
   }
 
   // A text field with speech input and a clear button inside: mic bottom right, a faint × top right.
@@ -939,8 +941,9 @@
 
   /* ── Open, close, tabs ───────────────────────────────── */
 
-  function open() {
+  function open(quiet) {
     isOpen = true;
+    engineStored('open', '1');
     ui.panel.hidden = false;
     ui.launcher.hidden = true;
     attention = false;
@@ -951,11 +954,12 @@
     clearTimeout(wsTimer);
     wsTimer = setTimeout(pollWorkspaces, 6000);
     updateControls();
-    focusInput();
+    if (!quiet) focusInput();                  // reopened by itself on a new page: leave the focus to the page
   }
 
   function close() {
     isOpen = false;
+    engineStored('open', null);
     ui.panel.hidden = true;
     ui.launcher.hidden = false;
     clearTimeout(wsTimer);
@@ -998,10 +1002,13 @@
   }
 
   // Docking needs room next to the page: below 760px the panel floats (or becomes a bottom sheet).
-  function dockNow() {
-    if (!isOpen || dock === 'float' || narrowScreen()) return 'float';
+  function dockFits() {
+    if (dock === 'float' || narrowScreen()) return false;
     const vw = window.innerWidth || 0;
-    return vw && vw < 760 ? 'float' : dock;
+    return !(vw && vw < 760);
+  }
+  function dockNow() {
+    return isOpen && dockFits() ? dock : 'float';
   }
 
   // The saved anchor stays as the user left it; only the shown position is clamped, so a panel that
