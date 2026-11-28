@@ -191,8 +191,8 @@ flowchart LR
    anywhere else on the server and has no network access.
 4. The diff review compares the result with the starting commit: blocked files, symlinks,
    dangerous patterns, too many files. Only a clean result is committed and published.
-5. The variant's cache version counts up and the panel reloads the page. The router appends the version
-   to the page's stylesheets, scripts and images (`site.css?v=12`), so nobody keeps looking at an old
+5. The variant's cache version counts up and the panel reloads the page. The router versions the
+   page's stylesheets, scripts and images with it and their change times (`site.css?v=12-1795185311`), so nobody keeps looking at an old
    file. The change is now one entry in **History** and can be undone on its own.
 
 More detail: [AGENTS.md](AGENTS.md) (configuration, routing, permissions, safety) and

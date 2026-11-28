@@ -15,9 +15,12 @@
  *
  * {mount} is the URL path the project lives under ('' at the domain root).
  *
- * Cache buster: the worker counts a variant's cache version up with every publication. HTML pages of the variant
- * get it appended to the addresses of their own stylesheets, scripts, images and media (?v=N), and every file is
- * sent with "Cache-Control: no-cache", so browsers ask again and get a short 304 while a file is unchanged.
+ * Cache buster: HTML pages get a version appended to the addresses of their own stylesheets, scripts, images and
+ * media. It names the file's change time and the variant's cache version, which the worker counts up with every
+ * publication (?v=N-mtime; ?v=mtime before the first one; ?v=N for a file that cannot be found). A version the
+ * page already carries (?v=2025) is replaced for files of the site, so a change also shows on pages that version
+ * by hand, and changes made outside SayAndShape count too. Every file is sent with "Cache-Control: no-cache", so
+ * browsers ask again and get a short 304 while a file is unchanged.
  */
 
 const SAYANDSHAPE_RT_SLUG = '[a-z0-9][a-z0-9-]{0,39}';
@@ -65,68 +68,126 @@ function sayandshapeRtVersion(string $root): int {
     return is_string($text) && preg_match('/^\s*(\d{1,9})\s*$/', $text, $m) ? (int) $m[1] : 0;
 }
 
-/** One address with the cache version appended, if it names a file of this site that a page loads. */
-function sayandshapeRtBustUrl(string $url, int $version): string {
+/**
+ * Where the cache buster looks for the files a page loads: the variant folder, the app folder for shared
+ * directories, the URL paths the variant answers under and the folder of the page's address.
+ */
+function sayandshapeRtBustContext(int $version, string $root, string $base, array $shared, string $urlRoot, string $mount, string $sub): array {
+    $pageDir = str_ends_with($sub, '/') ? rtrim($sub, '/') : rtrim(dirname($sub), '/');
+    $shared = array_values(array_filter(array_map(static fn($dir): string => trim((string) $dir, '/'), $shared), 'strlen'));
+    return ['version' => $version, 'root' => $root, 'base' => $base, 'shared' => $shared,
+            'url' => $urlRoot, 'mount' => $mount, 'dir' => $pageDir];
+}
+
+/** The file of the site an address names (relative or root-absolute), or null. Never a file outside the site. */
+function sayandshapeRtAssetFile(string $path, array $ctx): ?string {
+    $path = rawurldecode(html_entity_decode($path, ENT_QUOTES | ENT_HTML5));
+    if ($path === '' || str_contains($path, "\0") || str_contains($path, '\\')) return null;
+    if ($path[0] === '/') {
+        if ($ctx['url'] !== '' && str_starts_with($path, $ctx['url'] . '/')) $path = substr($path, strlen($ctx['url']));
+        elseif ($ctx['mount'] === '' || str_starts_with($path, $ctx['mount'] . '/')) $path = substr($path, strlen($ctx['mount']));
+        else return null;                                                               // outside this project
+    } else {
+        $path = $ctx['dir'] . '/' . $path;
+    }
+    $parts = [];
+    foreach (explode('/', $path) as $segment) {
+        if ($segment === '' || $segment === '.') continue;
+        if ($segment === '..') { if (!$parts) return null; array_pop($parts); continue; }
+        if ($segment[0] === '.') return null;                                           // never dotfiles or .git
+        $parts[] = $segment;
+    }
+    if (!$parts) return null;
+    $rel = implode('/', $parts);
+    $roots = [$ctx['root']];
+    if ($ctx['base'] !== '' && $ctx['base'] !== $ctx['root']) {
+        foreach ($ctx['shared'] as $dir) {
+            if (str_starts_with("$rel/", "$dir/")) { $roots[] = $ctx['base']; break; }
+        }
+    }
+    foreach ($roots as $root) {
+        $real = realpath($root);
+        $file = $real === false ? false : realpath("$real/$rel");
+        if ($file !== false && str_starts_with($file, "$real/") && is_file($file)) return $file;
+    }
+    return null;
+}
+
+/** One address with its version, if it names a file of this site that a page loads. */
+function sayandshapeRtBustUrl(string $url, array $ctx): string {
     if ($url === '' || preg_match('~^\s*(?:[a-z][a-z0-9+.-]*:|//|#)~i', $url)) return $url;     // other sites, data:, anchors
     [$rest, $fragment] = array_pad(explode('#', $url, 2), 2, null);
     [$path, $query] = array_pad(explode('?', $rest, 2), 2, null);
     if (!preg_match('~\.(?:' . SAYANDSHAPE_RT_ASSETS . ')$~i', $path)) return $url;
-    if ($query !== null && preg_match('~(?:^|&|&amp;)v=~i', $query)) return $url;               // the site versions it itself
-    return $path . '?' . ($query !== null && $query !== '' ? $query . '&amp;' : '') . "v=$version"
-        . ($fragment !== null ? "#$fragment" : '');
+    $file = sayandshapeRtAssetFile($path, $ctx);
+    $version = $ctx['version'];
+    if ($file !== null) $stamp = ($version > 0 ? "$version-" : '') . filemtime($file);
+    elseif ($version > 0) $stamp = (string) $version;
+    else return $url;
+    $query ??= '';
+    if (preg_match('~(?:^|&|&amp;)v=~i', $query)) {
+        if ($file === null) return $url;                     // an address the site versions itself and we cannot check
+        $query = preg_replace('~(^|&amp;|&)v=[^&]*~i', '${1}v=' . $stamp, $query, 1);
+    } else {
+        $query = ($query !== '' ? $query . '&amp;' : '') . "v=$stamp";
+    }
+    return $path . '?' . $query . ($fragment !== null ? "#$fragment" : '');
 }
 
 /**
- * Cache buster for a page: href/src/poster of <link>, <script>, <img>, <source>, <video>, <audio> and <track> get ?v=N.
+ * Cache buster for a page: href/src/poster of <link>, <script>, <img>, <source>, <video>, <audio> and <track> get ?v=….
  * Module scripts stay as they are: the same module under two addresses would be loaded and run twice.
  */
-function sayandshapeRtBust(string $html, int $version): string {
-    if ($version < 1) return $html;
-    $out = preg_replace_callback('~<(?:link|script|img|source|video|audio|track)\b[^>]*>~i', static function (array $tag) use ($version): string {
+function sayandshapeRtBust(string $html, array $ctx): string {
+    $out = preg_replace_callback('~<(?:link|script|img|source|video|audio|track)\b[^>]*>~i', static function (array $tag) use ($ctx): string {
         if (preg_match('~\s(?:type\s*=\s*["\']?module|rel\s*=\s*["\']?modulepreload)\b~i', $tag[0])) return $tag[0];
         return preg_replace_callback('~(\s(?:href|src|poster)\s*=\s*)(["\'])(.*?)\2~is',
-            static fn(array $m): string => $m[1] . $m[2] . sayandshapeRtBustUrl($m[3], $version) . $m[2], $tag[0]) ?? $tag[0];
+            static fn(array $m): string => $m[1] . $m[2] . sayandshapeRtBustUrl($m[3], $ctx) . $m[2], $tag[0]) ?? $tag[0];
     }, $html);
     return $out ?? $html;
 }
 
-/** Output filter for PHP pages: only HTML responses get the cache version and the panel's tag. */
-function sayandshapeRtFilterOutput(string $output, ?string $tag, int $version): string {
+/** Output filter for PHP pages: only HTML responses get the cache buster and the panel's tag. */
+function sayandshapeRtFilterOutput(string $output, ?string $tag, array $ctx): string {
     foreach (headers_list() as $header) {
         if (stripos($header, 'Content-Type:') === 0 && stripos($header, 'text/html') === false) return $output;
     }
-    $html = sayandshapeRtBust($output, $version);
+    $html = sayandshapeRtBust($output, $ctx);
     if ($tag !== null) $html = sayandshapeRtInject($html, $tag);
     if ($html !== $output && !headers_sent()) header_remove('Content-Length');     // the page's own length no longer fits
     return $html;
 }
 
 /** Static file with conditional requests and byte ranges (video seeking). Browsers revalidate it on every use. */
-function sayandshapeRtSend(string $file, ?string $tag, int $version = 0): bool {
+function sayandshapeRtSend(string $file, ?string $tag, ?array $ctx = null): bool {
     $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
     $type = SAYANDSHAPE_RT_TYPES[$ext] ?? 'application/octet-stream';
     $head = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD';
     $page = $ext === 'html' || $ext === 'htm';
-    $size = filesize($file);
-    $mtime = filemtime($file);
-    // A page changes with the cache version and with the panel's tag, not only with its file.
-    $etag = '"' . dechex($mtime) . '-' . dechex($size) . ($page ? "-$version" . ($tag !== null ? '-p' : '') : '') . '"';
     header('Content-Type: ' . $type);
     header('Cache-Control: no-cache');
-    header('ETag: ' . $etag);
     $match = $_SERVER['HTTP_IF_NONE_MATCH'] ?? null;
     if ($page) {
+        // A page changes with the files it loads, the cache version and the panel's tag, not only with its own
+        // file: its ETag is taken from what is sent.
+        $html = (string) file_get_contents($file);
+        if ($ctx !== null) $html = sayandshapeRtBust($html, $ctx);
+        if ($tag !== null) $html = sayandshapeRtInject($html, $tag);
+        $etag = '"' . substr(md5($html), 0, 20) . '"';
+        header('ETag: ' . $etag);
         header('Vary: Cookie');                      // with or without the panel: the login decides
         if ($match !== null && trim($match) === $etag) {
             http_response_code(304);
             return true;
         }
-        $html = sayandshapeRtBust((string) file_get_contents($file), $version);
-        if ($tag !== null) $html = sayandshapeRtInject($html, $tag);
         header('Content-Length: ' . strlen($html));
         if (!$head) echo $html;
         return true;
     }
+    $size = filesize($file);
+    $mtime = filemtime($file);
+    $etag = '"' . dechex($mtime) . '-' . dechex($size) . '"';
+    header('ETag: ' . $etag);
     header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
     header('Accept-Ranges: bytes');
     $since = $_SERVER['HTTP_IF_MODIFIED_SINCE'] ?? null;
@@ -178,7 +239,7 @@ function sayandshapeRtResolve(string $root, string $sub): ?string {
 
 /**
  * Handles the request. Returns true when a response was sent, false when the request is not ours,
- * or ['file' => …, 'tag' => …, 'version' => …] for a PHP page of the app, which the caller runs in the global scope.
+ * or ['file' => …, 'tag' => …, 'bust' => …] for a PHP page of the app, which the caller runs in the global scope.
  */
 function sayandshapeRoute() {
     $engine = rtrim(SAYANDSHAPE_ENGINE_DIR, '/');
@@ -257,6 +318,7 @@ function sayandshapeRoute() {
     }
     if ($root === '' || !is_dir($root)) return sayandshapeRtStatus(503, 'SayAndShape: project folder not found');
     $version = sayandshapeRtVersion($root);          // of the variant, also for files that come from a shared directory
+    $bust = sayandshapeRtBustContext($version, $root, $base, (array) ($app['shared_dirs'] ?? []), $mount . $prefix, $mount, $sub);
     if (is_dir($root . $sub) && !str_ends_with($sub, '/')) return sayandshapeRtRedirect("$mount$prefix$sub/", 301);
     $file = sayandshapeRtResolve($root, $sub);
     if ($file === null && $root !== $base && $base !== '') {
@@ -282,24 +344,24 @@ function sayandshapeRoute() {
     $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
     if ($ext !== 'php') {
         if (preg_match('/^(phtml|phar|phps|php\d)$/', $ext)) return sayandshapeRtStatus(404, 'Not found');
-        return sayandshapeRtSend($file, $tag, $version);
+        return sayandshapeRtSend($file, $tag, $bust);
     }
     // Let the page see itself the way a web server would present it.
     $_SERVER['SCRIPT_FILENAME'] = $file;
     $_SERVER['SCRIPT_NAME'] = $_SERVER['PHP_SELF'] = $mount . $prefix . substr($file, strlen($root));
     if ($mount === '') $_SERVER['DOCUMENT_ROOT'] = $root;
-    return ['file' => $file, 'tag' => $tag, 'version' => $version];
+    return ['file' => $file, 'tag' => $tag, 'bust' => $bust];
 }
 
 $__sayandshape = sayandshapeRoute();
 if (is_array($__sayandshape)) {
-    [$__sayandshapeTag, $__sayandshapeVersion] = [$__sayandshape['tag'], $__sayandshape['version']];
+    [$__sayandshapeTag, $__sayandshapeBust] = [$__sayandshape['tag'], $__sayandshape['bust']];
     if ($__sayandshapeTag !== null) {
-        ob_start(static fn(string $output): string => sayandshapeRtFilterOutput($output, $__sayandshapeTag, $__sayandshapeVersion));
-    } elseif ($__sayandshapeVersion > 0 && stripos((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'text/html') !== false) {
+        ob_start(static fn(string $output): string => sayandshapeRtFilterOutput($output, $__sayandshapeTag, $__sayandshapeBust));
+    } elseif (stripos((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'text/html') !== false) {
         // Visitors: only page views are filtered (not API calls or event streams), in blocks of 1 MiB so that a
         // page that sends a large file never has to fit into memory. An address cut by a block border stays as it is.
-        ob_start(static fn(string $output): string => sayandshapeRtFilterOutput($output, null, $__sayandshapeVersion), 1048576);
+        ob_start(static fn(string $output): string => sayandshapeRtFilterOutput($output, null, $__sayandshapeBust), 1048576);
     }
     $__sayandshapeFile = $__sayandshape['file'];
     unset($__sayandshape);

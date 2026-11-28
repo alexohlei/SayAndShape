@@ -48,9 +48,9 @@ installations inside a container) the agent runs with `--dangerously-skip-permis
 the worker moves a variant to another state of its files: after publishing a change, an undo, a
 reset or a merge, and after withdrawing an interrupted publication (also during recovery). A job
 that publishes nothing (follow-up questions only, "Set new baseline") leaves it alone. The file is
-written atomically, is world-readable for the web server and never fails a job. The router appends
-the number to the addresses of a page's stylesheets, scripts and images; see "Cache buster" in
-`AGENTS.md`.
+written atomically, is world-readable for the web server and never fails a job. The router puts
+the number, together with each file's change time, into the addresses of a page's stylesheets,
+scripts and images; see "Cache buster" in `AGENTS.md`.
 
 ## Variants (workspaces)
 

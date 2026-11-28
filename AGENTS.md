@@ -299,16 +299,25 @@ Every variant has a cache version, a number in `clone_dir/<slug>/.git/sayandshap
 publishes a new state of the variant's files: a change, an undo, a reset, a merge, and when it
 withdraws an interrupted publication. A variant without a published change has none.
 
-The router uses it for visitors and logged-in people alike:
+The router uses it, together with each file's change time, for visitors and logged-in people alike:
 
-- In HTML pages of the variant (static files and the output of PHP pages) it appends `?v=<number>`
-  to `href`, `src` and `poster` of `<link>`, `<script>`, `<img>`, `<source>`, `<video>`, `<audio>`
-  and `<track>` when the address names a stylesheet, script, image, font or media file of the site
-  itself. Addresses of other hosts, `data:` addresses, addresses that already carry a `v=`
-  parameter and module scripts (`type="module"`, `modulepreload`) stay as they are.
+- In HTML pages (static files and the output of PHP pages) it versions `href`, `src` and `poster` of
+  `<link>`, `<script>`, `<img>`, `<source>`, `<video>`, `<audio>` and `<track>` when the address
+  names a stylesheet, script, image, font or media file of the site itself:
+  - the file is found in the variant (or, for a shared directory, in the app folder):
+    `?v=<number>-<change time>`, or `?v=<change time>` while the variant has no cache version yet
+    (also when the app folder itself is served). A change made outside SayAndShape counts as well,
+    and only the changed file gets a new address.
+  - the file is not found: `?v=<number>`, nothing without a cache version.
+  - A `v=` the page already carries (`app.js?v=2025`) is replaced for files that are found, so
+    pages that version their files by hand still show every change; for files that are not found
+    it stays.
+  - Addresses of other hosts, `data:` addresses, anchors and module scripts (`type="module"`,
+    `modulepreload`) stay as they are.
 - Every file is sent with `Cache-Control: no-cache` and an `ETag`, so browsers ask again on each use
   and get a `304` while the file is unchanged. That also covers what a page loads without a tag
-  (images in CSS, imports, `fetch`). A page's `ETag` includes the cache version.
+  (images in CSS, imports, `fetch`). A page's `ETag` is taken from the HTML that is sent, so it
+  changes with the versions of the files it loads and with the panel.
 - PHP output is filtered for page views only (`Accept: text/html` and an HTML response), for visitors
   in blocks of 1 MiB; API answers, downloads and event streams pass through untouched.
 

@@ -7,6 +7,18 @@ engine in `/var/www/SayAndShape`; adjust paths and ID accordingly.
 
 All Git repositories stay local on the server. There is no remote.
 
+## Version 1.1.1: cache buster with change times
+
+Replace the engine files; nothing else to do.
+
+- The router versions each stylesheet, script and image of a page with the file's change time as
+  well as the variant's cache version (`?v=12-1795185311`; `?v=1795185311` before the first
+  published change). Changes show at once even before the first publication and when files are
+  changed outside SayAndShape, and only the changed file gets a new address.
+- A `v=` the site sets itself (`app.js?v=2025`) is now replaced for files of the site; until now
+  such addresses never changed.
+- A page's `ETag` follows the HTML that is sent, so it changes as soon as a file it loads changes.
+
 ## Version 1.1.0: agent sandbox, deleting inside the site, cache buster
 
 Replace the engine files (step 1 below, or `bin/sayandshape update`) and restart the worker.

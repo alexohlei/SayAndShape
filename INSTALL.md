@@ -331,8 +331,9 @@ browser ──► web server ──► <project>/sayandshape-router.php ──�
 - With `serve: root` every file of the project is delivered through PHP (with caching headers and
   byte ranges). That is fine for ordinary sites; for very busy ones put a cache in front or use
   `--serve prefix`, which leaves the live site to the web server.
-- Cache buster: every published change counts the variant's cache version up. Pages of the variant
-  get it appended to their own stylesheets, scripts and images (`css/site.css?v=12`), and files are
+- Cache buster: pages get each of their own stylesheets, scripts and images versioned with the file's
+  change time and the variant's cache version, which every published change counts up
+  (`css/site.css?v=12-1795185311`); a `v=` the page sets itself is replaced. Files are
   sent with `Cache-Control: no-cache`, so browsers ask again and get a short `304` while a file is
   unchanged. Nothing has to be set up for this, and the site's files are not edited for it.
 - The engine folder carries an `.htaccess` that denies all direct web access (Apache). Nginx has

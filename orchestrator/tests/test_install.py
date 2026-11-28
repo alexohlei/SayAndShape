@@ -286,53 +286,77 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(status, 200, path)
             self.assertNotIn(b'sayandshape-widget.js', body)
 
-    def test_cache_version_reaches_pages_of_the_variant(self):
+    def test_cache_buster_names_file_change_and_variant_version(self):
         self.cli('add', str(self.site), '--server', 'php')
         url = self.serve(self.site)
         page = ('<html><head><link rel="stylesheet" href="css/site.css"><link rel="canonical" href="https://example.org/">'
-                '<script src="/js/app.js?x=1"></script><script type="module" src="js/mod.js"></script></head>'
-                '<body><img src="media/clip.png"><a href="css/site.css">css</a></body></html>')
-        busted = page.replace('css/site.css">', 'css/site.css?v=3">', 1).replace('app.js?x=1', 'app.js?x=1&amp;v=3') \
-                     .replace('media/clip.png', 'media/clip.png?v=3')
+                '<script src="/js/app.js?x=1&amp;v=2025#top"></script><script src="js/gone.js?v=7"></script>'
+                '<script type="module" src="js/mod.js"></script></head>'
+                '<body><img src="media/clip.png"><img src="../outside.png"><a href="css/site.css">css</a></body></html>')
         (self.site / 'index.html').write_text(page)
-        (self.site / 'page.php').write_text('<?php ?><html><body><img src="a.png"></body></html>')
-        (self.site / 'data.php').write_text('<?php header("Content-Type: application/json"); echo json_encode(["html" => "<img src=\\"a.png\\">"]);')
+        (self.site / 'js').mkdir()
+        for name in ('js/app.js', 'js/mod.js'):
+            (self.site / name).write_text('1')
+        (self.site / 'media/clip.png').write_bytes(b'png')
+        (self.site / 'page.php').write_text('<?php ?><html><body><img src="css/site.css"></body></html>')
+        (self.site / 'data.php').write_text('<?php header("Content-Type: application/json"); echo json_encode(["html" => "<img src=\\"css/site.css\\">"]);')
         html = {'Accept': 'text/html,application/xhtml+xml'}
-        # Before the first change the project folder itself is served: no version, pages stay byte for byte.
+
+        def busted(css, js, png):
+            # Own files get their version, also where the page versions them itself (v=2025). A file that cannot be
+            # found gets the variant's version, or keeps the page's own (gone.js?v=7). Other sites, links and module
+            # scripts stay as they are.
+            out = (page.replace('href="css/site.css">', f'href="css/site.css?v={css}">', 1)
+                   .replace('x=1&amp;v=2025#top', f'x=1&amp;v={js}#top').replace('media/clip.png', f'media/clip.png?v={png}'))
+            version = str(css).partition('-')[0] if '-' in str(css) else None
+            return out.replace('../outside.png', f'../outside.png?v={version}') if version else out
+
+        # Before the first change the project folder itself is served: the change time alone, from the first request on.
+        os.utime(self.site / 'css/site.css', (1000, 1000))
+        os.utime(self.site / 'js/app.js', (2000, 2000))
+        os.utime(self.site / 'media/clip.png', (3000, 3000))
         status, body, headers = self.get(url + '/')
-        self.assertEqual((status, body.decode(), headers['Cache-Control']), (200, page, 'no-cache'))
-        self.assertEqual(self.get(url + '/page.php', headers=html)[1], b'<html><body><img src="a.png"></body></html>')
+        self.assertEqual((status, body.decode(), headers['Cache-Control']), (200, busted(1000, 2000, 3000), 'no-cache'))
+        self.assertEqual(self.get(url + '/page.php', headers=html)[1], b'<html><body><img src="css/site.css?v=1000"></body></html>')
 
         main = self.variant('site', 'main', {})
-        self.assertEqual(self.get(url + '/')[1].decode(), page)                 # a variant without a published change
+        os.utime(main / 'css/site.css', (1000, 1000))
+        os.utime(main / 'js/app.js', (2000, 2000))
         (main / '.git/sayandshape-cache-version').write_text('3')
         status, body, headers = self.get(url + '/')
-        self.assertEqual((status, body.decode(), headers['Cache-Control']), (200, busted, 'no-cache'))
-        self.assertEqual(self.get(url + '/w/main/index.html')[1].decode(), busted)
-        # The page is revalidated, and a new version is a new page.
+        # media/ is a shared directory: its files come from the app folder, with the variant's version.
+        self.assertEqual((status, body.decode(), headers['Cache-Control']), (200, busted('3-1000', '3-2000', '3-3000'), 'no-cache'))
+        self.assertEqual(self.get(url + '/w/main/index.html')[1].decode(), busted('3-1000', '3-2000', '3-3000'))
+        # The page is revalidated; a new version is a new page …
         self.assertEqual(self.get(url + '/', headers={'If-None-Match': headers['ETag']})[0], 304)
         (main / '.git/sayandshape-cache-version').write_text('4')
-        status, body, _ = self.get(url + '/', headers={'If-None-Match': headers['ETag']})
-        self.assertEqual((status, body.decode()), (200, busted.replace('v=3', 'v=4')))
-        # Logged-in browsers get the version and the panel.
+        status, body, headers = self.get(url + '/', headers={'If-None-Match': headers['ETag']})
+        self.assertEqual((status, body.decode()), (200, busted('4-1000', '4-2000', '4-3000')))
+        # … and so is a change to one file, also one made by hand, outside SayAndShape: only its address changes.
+        os.utime(main / 'js/app.js', (2500, 2500))
+        status, body, headers = self.get(url + '/', headers={'If-None-Match': headers['ETag']})
+        self.assertEqual((status, body.decode()), (200, busted('4-1000', '4-2500', '4-3000')))
+        # Logged-in browsers get the versions and the panel.
         body = self.get(url + '/', headers={'Cookie': 'sayandshape_ui=1'})[1].decode()
-        self.assertIn('css/site.css?v=4', body)
+        self.assertIn('css/site.css?v=4-1000', body)
         self.assertIn('sayandshape-widget.js" data-app="site"', body)
         # Files are served under the versioned address and are revalidated instead of being kept blindly.
-        status, body, headers = self.get(url + '/css/site.css?v=4')
+        status, body, headers = self.get(url + '/css/site.css?v=4-1000')
         self.assertEqual((status, body, headers['Cache-Control']), (200, b'body { color: black; }', 'no-cache'))
-        self.assertEqual(self.get(url + '/css/site.css?v=4', headers={'If-None-Match': headers['ETag']})[0], 304)
+        self.assertEqual(self.get(url + '/css/site.css?v=4-1000', headers={'If-None-Match': headers['ETag']})[0], 304)
         self.assertEqual(self.get(url + '/media/clip.bin?v=4')[2]['Cache-Control'], 'no-cache')
-        # PHP pages: page views get the version, also for visitors; other answers stay untouched.
-        self.assertEqual(self.get(url + '/page.php', headers=html)[1], b'<html><body><img src="a.png?v=4"></body></html>')
-        self.assertEqual(self.get(url + '/page.php')[1], b'<html><body><img src="a.png"></body></html>')
-        self.assertEqual(json.loads(self.get(url + '/data.php', headers=html)[1]), {'html': '<img src="a.png">'})
+        # PHP pages: page views get the versions, also for visitors; other answers stay untouched.
+        self.assertEqual(self.get(url + '/page.php', headers=html)[1], b'<html><body><img src="css/site.css?v=4-1000"></body></html>')
+        self.assertEqual(self.get(url + '/page.php')[1], b'<html><body><img src="css/site.css"></body></html>')
+        self.assertEqual(json.loads(self.get(url + '/data.php', headers=html)[1]), {'html': '<img src="css/site.css">'})
         body = self.get(url + '/page.php', headers={'Cookie': 'sayandshape_ui=1'})[1]
-        self.assertIn(b'<img src="a.png?v=4">', body)
+        self.assertIn(b'<img src="css/site.css?v=4-1000">', body)
         self.assertIn(b'sayandshape-widget.js', body)
-        # Another variant counts on its own.
-        self.variant('site', 'winter', {})
-        self.assertEqual(self.get(url + '/w/winter/')[1].decode(), page)
+        # Another variant counts on its own; root-absolute addresses on its pages name its own files.
+        winter = self.variant('site', 'winter', {})
+        os.utime(winter / 'css/site.css', (1000, 1000))
+        os.utime(winter / 'js/app.js', (5000, 5000))
+        self.assertEqual(self.get(url + '/w/winter/')[1].decode(), busted(1000, 5000, 3000))
 
     def test_prefix_mode_keeps_the_app_at_its_address(self):
         self.cli('add', str(self.site), '--server', 'php', '--serve', 'prefix')
