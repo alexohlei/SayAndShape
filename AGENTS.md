@@ -292,6 +292,14 @@ requests and byte ranges, runs PHP pages inside their variant (working directory
 never serves dot-paths or the router stub from a variant, and redirects root-absolute requests
 that come from a page under `/w/<slug>/` into that variant.
 
+Because the web server never sees what the router serves, the router applies the site's own
+`.htaccess` denials itself (`sayandshapeRtForbidden()`): a folder whose `.htaccess` says
+`Require all denied` or `Deny from all` at the top level (also inside `<IfModule>`) answers 403,
+together with everything below it, until a subfolder allows access again; files denied by
+`<Files>` or `<FilesMatch>` answer 403 in that folder and below. `<If>`, `<Limit>` and other
+conditional sections are not evaluated. Without this, `/w/<slug>/data/…` would hand out what the
+site keeps closed under its normal address.
+
 ### Cache buster
 
 Every variant has a cache version, a number in `clone_dir/<slug>/.git/sayandshape-cache-version`

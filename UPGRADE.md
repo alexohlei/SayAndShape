@@ -7,6 +7,17 @@ engine in `/var/www/SayAndShape`; adjust paths and ID accordingly.
 
 All Git repositories stay local on the server. There is no remote.
 
+## Version 1.1.2: the site's .htaccess denials hold for variants
+
+Replace the engine files; nothing else to do.
+
+- Until now `/w/<slug>/…` bypassed the site's own `.htaccess` rules, because variants are served
+  through PHP and not by the web server: a folder such as `data/` or `tests/` with
+  `Require all denied` was closed under the normal address but open under `/w/main/data/…` for
+  everyone who could reach the site. The router now answers 403 for folders denied at the top level
+  of their `.htaccess` (and everything below them) and for files denied by `<Files>`/`<FilesMatch>`.
+- Check with `curl -I https://example.org/w/main/data/<file>` that such paths now answer 403.
+
 ## Version 1.1.1: cache buster with change times
 
 Replace the engine files; nothing else to do.

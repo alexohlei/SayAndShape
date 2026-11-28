@@ -358,6 +358,41 @@ class InstallTests(unittest.TestCase):
         os.utime(winter / 'js/app.js', (5000, 5000))
         self.assertEqual(self.get(url + '/w/winter/')[1].decode(), busted(1000, 5000, 3000))
 
+    def test_variants_respect_the_sites_htaccess_denials(self):
+        # Apache never sees /w/<slug>/…: folders and files the site's .htaccess denies must stay closed there too.
+        self.cli('add', str(self.site), '--server', 'php')
+        url = self.serve(self.site)
+        files = {
+            '.htaccess': '<IfModule mod_rewrite.c>\nRewriteEngine On\n</IfModule>\nRequire valid-user\n'
+                         '<If "%{HTTPS} != \'on\'">\n  Require all granted\n</If>\n'
+                         '<Files "secret.txt">\n  Require all denied\n</Files>\n'
+                         '<FilesMatch "\\.(sqlite|log)$">\n  Require all denied\n</FilesMatch>\n',
+            'data/.htaccess': '# never served\nRequire all denied\n',
+            'data/db.bin': 'customers', 'data/backups/day.zip': 'zip',
+            'tests/.htaccess': '<IfModule mod_authz_core.c>\n  Require all denied\n</IfModule>\n',
+            'tests/run.php': '<?php echo "ran";',
+            'old/.htaccess': 'Deny from all\n', 'old/open/.htaccess': 'Require all granted\n', 'old/open/page.html': 'open',
+            'old/closed.html': 'closed',
+            'secret.txt': 'secret', 'notes/secret.txt': 'secret', 'app.sqlite': 'db', 'notes/app.log': 'log',
+            'public.txt': 'public',
+        }
+        for name in files:
+            (self.site / name).parent.mkdir(parents=True, exist_ok=True)
+        main = self.variant('site', 'main', {})
+        for name, text in files.items():
+            (main / name).parent.mkdir(parents=True, exist_ok=True)
+            (main / name).write_text(text)
+        for path in ('/w/main/data/db.bin', '/w/main/data/backups/day.zip', '/w/main/tests/run.php', '/w/main/old/closed.html',
+                     '/w/main/secret.txt', '/w/main/notes/secret.txt', '/w/main/app.sqlite', '/w/main/notes/app.log',
+                     '/data/db.bin', '/tests/run.php'):
+            status, body, _ = self.get(url + path)
+            self.assertEqual(status, 403, path)
+            self.assertNotIn(body, (b'customers', b'zip', b'ran', b'closed', b'secret', b'db', b'log'), path)
+        # A folder may open again below a closed one; everything else is served as before.
+        for path, text in (('/w/main/old/open/page.html', b'open'), ('/w/main/public.txt', b'public'), ('/public.txt', b'public')):
+            self.assertEqual(self.get(url + path)[:2], (200, text), path)
+        self.assertEqual(self.get(url + '/w/main/')[0], 200)
+
     def test_prefix_mode_keeps_the_app_at_its_address(self):
         self.cli('add', str(self.site), '--server', 'php', '--serve', 'prefix')
         url = self.serve(self.site)

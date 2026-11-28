@@ -327,7 +327,9 @@ browser ──► web server ──► <project>/sayandshape-router.php ──�
   logged in. Pages that already contain a `sayandshape-widget.js` tag are left alone.
 - Links and assets that start with `/` work inside variants too: such a request coming from a
   page under `/w/<variant>/` is redirected into that variant.
-- Paths starting with a dot (`.git`, `.env`, `.htaccess`) are never served from a variant.
+- Paths starting with a dot (`.git`, `.env`, `.htaccess`) are never served from a variant, and folders
+  or files the site's `.htaccess` denies (`Require all denied`, `Deny from all`, `<Files>`) stay
+  closed under `/w/<slug>/` as well.
 - With `serve: root` every file of the project is delivered through PHP (with caching headers and
   byte ranges). That is fine for ordinary sites; for very busy ones put a cache in front or use
   `--serve prefix`, which leaves the live site to the web server.

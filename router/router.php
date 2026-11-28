@@ -225,6 +225,63 @@ function sayandshapeRtSend(string $file, ?string $tag, ?array $ctx = null): bool
     return true;
 }
 
+/**
+ * Access rules of one .htaccess that the router has to respect itself, because variants are served through PHP and
+ * not by the web server: the folder's own Require/Deny at the top level ('denied', 'allowed' or null) and the file
+ * patterns that <Files>/<FilesMatch> deny. <IfModule> and similar wrappers count as top level; <If>, <Limit> and other
+ * conditional sections are not evaluated.
+ */
+function sayandshapeRtHtaccess(string $path): array {
+    $rules = ['dir' => null, 'files' => []];
+    $text = @file_get_contents($path);
+    if (!is_string($text)) return $rules;
+    $stack = [];
+    foreach (preg_split('/\r?\n/', $text) as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#') continue;
+        if (preg_match('~^</\s*([A-Za-z]+)\s*>~', $line)) { array_pop($stack); continue; }
+        if (preg_match('~^<\s*([A-Za-z]+)\b\s*(.*?)\s*>~', $line, $m)) { $stack[] = [strtolower($m[1]), trim($m[2], " \t\"'")]; continue; }
+        $context = null;
+        foreach ($stack as $entry) {
+            if (!in_array($entry[0], ['ifmodule', 'ifversion', 'ifdefine', 'ifdirective', 'iffile'], true)) { $context = $entry; break; }
+        }
+        $denies = (bool) preg_match('~^(?:Require\s+all\s+denied|Deny\s+from\s+all)\s*$~i', $line);
+        if ($context === null) {
+            if ($denies) $rules['dir'] = 'denied';
+            elseif (preg_match('~^(?:Require|Allow\s+from)\s~i', $line)) $rules['dir'] = 'allowed';
+        } elseif ($denies && in_array($context[0], ['files', 'filesmatch'], true) && $context[1] !== '') {
+            $rules['files'][] = $context;
+        }
+    }
+    return $rules;
+}
+
+/**
+ * True when the site's .htaccess files deny a file (data/, tests/ with "Require all denied" and the like). Apache does
+ * not see requests for variants, so without this check /w/<slug>/data/… would bypass those rules. A folder's own rule
+ * replaces the one of its parent, file rules hold for the folder and everything below it.
+ */
+function sayandshapeRtForbidden(string $root, string $file): bool {
+    $root = rtrim($root, '/');
+    if (!str_starts_with($file, "$root/")) return false;
+    $denied = false;
+    $patterns = [];
+    $dir = $root;
+    $segments = explode('/', substr(dirname($file), strlen($root)));
+    foreach (array_merge([''], array_filter($segments, 'strlen')) as $segment) {
+        if ($segment !== '') $dir .= "/$segment";
+        $rules = sayandshapeRtHtaccess("$dir/.htaccess");
+        if ($rules['dir'] !== null) $denied = $rules['dir'] === 'denied';
+        array_push($patterns, ...$rules['files']);
+    }
+    if ($denied) return true;
+    $name = basename($file);
+    foreach ($patterns as [$type, $pattern]) {
+        if ($type === 'files' ? fnmatch($pattern, $name) : @preg_match('~' . str_replace('~', '\~', $pattern) . '~', $name) === 1) return true;
+    }
+    return false;
+}
+
 /** The file a URL path names inside $root, or null. Directories resolve to their index file. */
 function sayandshapeRtResolve(string $root, string $sub): ?string {
     $file = rtrim($root . $sub, '/');
@@ -331,6 +388,7 @@ function sayandshapeRoute() {
         }
     }
     if ($file === null) return sayandshapeRtStatus(404, 'Not found');
+    if (sayandshapeRtForbidden($root, $file)) return sayandshapeRtStatus(403, 'Forbidden');     // the site's .htaccess rules
 
     // The panel is added for people who may edit: with the engine login (hint cookie) or, for projects
     // using the app's own admin session, on every page (the panel then checks the session itself).

@@ -101,6 +101,7 @@ const SAYANDSHAPE_DE = [
     // ── Router (plain-text responses) ──
     'Bad request' => 'Ungültige Anfrage',
     'Not found' => 'Nicht gefunden',
+    'Forbidden' => 'Zugriff verweigert',
     'SayAndShape: project not registered' => 'SayAndShape: Projekt nicht registriert',
     'SayAndShape: project folder not found' => 'SayAndShape: Projektordner nicht gefunden',
 
